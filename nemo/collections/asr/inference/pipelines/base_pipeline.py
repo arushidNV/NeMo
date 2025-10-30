@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import re
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Iterable
 
 from omegaconf import DictConfig
 
@@ -28,6 +29,7 @@ from nemo.collections.asr.inference.streaming.buffering.feature_bufferer import 
 from nemo.collections.asr.inference.streaming.framing.multi_stream import ContinuousBatchedRequestStreamer
 from nemo.collections.asr.inference.streaming.framing.request import FeatureBuffer, Frame, Request
 from nemo.collections.asr.inference.streaming.framing.request_options import ASRRequestOptions
+from nemo.collections.asr.inference.streaming.state.state import StreamingState
 from nemo.collections.asr.inference.streaming.text.text_processing import StreamingTextProcessor
 from nemo.collections.asr.inference.utils.bpe_decoder import BPEDecoder
 from nemo.collections.asr.inference.utils.context_manager import CacheAwareContextManager
@@ -35,6 +37,7 @@ from nemo.collections.asr.inference.utils.enums import RequestType
 from nemo.collections.asr.inference.utils.pipeline_utils import (
     check_existance_of_required_attributes,
     get_leading_punctuation_regex_pattern,
+    ids_to_text_without_stripping,
 )
 from nemo.collections.asr.inference.utils.progressbar import ProgressBar
 from nemo.collections.asr.inference.utils.text_segment import TextSegment
@@ -44,22 +47,52 @@ if TYPE_CHECKING:
     from nemo.collections.asr.inference.itn.inverse_normalizer import AlignmentPreservingInverseNormalizer
 
 
-class PipelineOutput:
+@dataclass
+class TranscribeStepOutput:
     """
-    Class to store the output of the pipeline. Contains transcriptions and text segments.
+    Stores the output of a single transcribe step.
     """
 
-    def __init__(self, texts: list[str] | None = None, segments: list[list[TextSegment]] | None = None):
+    stream_id: int
+    # Final transcript is the transcript generated started from the previous EoU to the current EoU
+    # It is finilized transcript, optionally punctuated and ITN-normalized. It's not subject to further modifications.
+    # Final segments contains metadata for each word/segment in the final transcript.
+    final_transcript: str | None = None
+    final_segments: list[TextSegment] | None = None
+    # Partial transcript is the transcript generated started from the previous EoU up to the current frame
+    # It is not finilized transcript, it may be subject to further modifications.
+    # It can also contain transcript from future frames.
+    partial_transcript: str | None = None
+    # Current step transcript is the transcript generated from the current frame
+    current_step_transcript: str | None = None
+
+    @classmethod
+    def from_state(cls, state: StreamingState, request: Request, sep: str = ' ') -> 'TranscribeStepOutput':
         """
-        Initialize the PipelineOutput.
+        Create a TranscribeStepOutput from a StreamingState
         Args:
-            texts: (list[str] | None) List of transcriptions.
-            segments: (list[list[TextSegment]] | None) List of corresponding text segments.
+            state (StreamingState): The state to create the output from.
+            request (Request): The request to create the output from.
+            sep (str): The separator for the text postprocessor.
+        Returns:
+            TranscribeStepOutput: The output for the step.
         """
-        if texts is None and segments is None:
-            raise ValueError("At least one of the 'texts' or 'segments' should be provided.")
-        self.texts = texts
-        self.segments = segments
+        final_transcript = state.final_transcript.strip()
+        final_segments = [seg.copy() for seg in state.final_segments]
+        if final_transcript:
+            separator = ''
+            if not request.is_first and state.concat_with_space:
+                separator = sep
+            final_transcript = separator + final_transcript
+            if len(final_segments) > 0:
+                final_segments[0].text = separator + final_segments[0].text
+        return cls(
+            stream_id=request.stream_id,
+            final_transcript=final_transcript,
+            final_segments=final_segments,
+            partial_transcript=state.partial_transcript,
+            current_step_transcript=state.current_step_transcript,
+        )
 
 
 class BasePipeline(PipelineInterface):
@@ -69,13 +102,13 @@ class BasePipeline(PipelineInterface):
 
     def __init__(self):
         """Initialize state pool to store the state for each stream"""
-        self._state_pool: dict[int, Any] = {}
+        self._state_pool: dict[int, StreamingState] = {}
 
-    def get_state(self, stream_id: int) -> Any:
+    def get_state(self, stream_id: int) -> StreamingState:
         """Retrieve state for a given stream ID."""
         return self._state_pool.get(stream_id, None)
 
-    def get_states(self, stream_ids: Iterable[int]) -> list[Any]:
+    def get_states(self, stream_ids: Iterable[int]) -> list[StreamingState]:
         """Retrieve states for a list of stream IDs."""
         return [self.get_state(stream_id) for stream_id in stream_ids]
 
@@ -89,7 +122,7 @@ class BasePipeline(PipelineInterface):
         for stream_id in stream_ids:
             self.delete_state(stream_id)
 
-    def init_state(self, stream_id: int, options: ASRRequestOptions) -> Any:
+    def init_state(self, stream_id: int, options: ASRRequestOptions) -> StreamingState:
         """Initialize the state of the stream"""
         if stream_id not in self._state_pool:
             state = self.create_state(options)
@@ -128,14 +161,44 @@ class BasePipeline(PipelineInterface):
         """Return the separator for the text postprocessor."""
         pass
 
-    def transcribe_step(self, requests: list[Request]) -> None:
-        """Transcribe a step"""
+    def transcribe_step(self, requests: list[Request]) -> list[TranscribeStepOutput]:
+        """
+        Transcribe a step
+        Args:
+            requests (list[Request]): List of Request objects.
+        Returns:
+            list[TranscribeStepOutput]: List of TranscribeStepOutput objects.
+        """
+
+        # Initialize the state if it is the first request for the stream
+        for request in requests:
+            if request.is_first:
+                self.init_state(request.stream_id, request.options)
+
+        # Perform the transcribe step for the frames or feature buffers
         if isinstance(requests[0], Frame):
             self.transcribe_step_for_frames(frames=requests)
         elif isinstance(requests[0], FeatureBuffer):
             self.transcribe_step_for_feature_buffers(fbuffers=requests)
         else:
             raise ValueError(f"Invalid request type: {type(requests[0])}")
+
+        # Create current step output for each request
+        outputs = []
+        for request in requests:
+
+            # Extract current step output from the state
+            state = self.get_state(request.stream_id)
+            step_output = TranscribeStepOutput.from_state(state=state, request=request, sep=self.get_sep())
+            outputs.append(step_output)
+
+            # Cleanup the state after the response is sent
+            state.cleanup_after_response()
+
+            # If last request, delete state from the state pool to free memory
+            if request.is_last:
+                self.delete_state(request.stream_id)
+        return outputs
 
     def copy_asr_model_attributes(self, asr_model: ASRInferenceWrapper) -> None:
         """
@@ -165,24 +228,32 @@ class BasePipeline(PipelineInterface):
         self, requests: list[Request], tokenizer: TokenizerSpec, leading_regex_pattern: str
     ) -> None:
         """
-        Update partial transcript from the state.
+        Update partial and current step transcripts from the state.
         Args:
             requests (list[Request]): List of Request objects.
             tokenizer (TokenizerSpec): Used to convert tokens into text
             leading_regex_pattern (str): Regex pattern for the punctuation marks.
         """
+        word_separator = self.get_sep()
         for request in requests:
             state = self.get_state(request.stream_id)
             # state tokens represent all tokens accumulated since the EOU
             # incomplete segment tokens are the remaining tokens on the right side of the buffer after EOU
             all_tokens = state.tokens + state.incomplete_segment_tokens
             if len(all_tokens) > 0:
-                pt_string = tokenizer.ids_to_text(all_tokens)
+                pt_string = ids_to_text_without_stripping(all_tokens, tokenizer, word_separator)
                 if leading_regex_pattern:
                     pt_string = re.sub(leading_regex_pattern, r'\1', pt_string)
                 state.partial_transcript = pt_string
             else:
                 state.partial_transcript = ""
+
+            current_step_tokens = state.current_step_tokens
+            if len(current_step_tokens) > 0:
+                step_transcript = ids_to_text_without_stripping(current_step_tokens, tokenizer, word_separator)
+                state.current_step_transcript = step_transcript
+            else:
+                state.current_step_transcript = ""
 
     def init_bpe_decoder(self) -> None:
         """Initialize the BPE decoder"""
@@ -309,7 +380,7 @@ class BasePipeline(PipelineInterface):
         audio_filepaths: list[str],
         options: list[ASRRequestOptions] | None = None,
         progress_bar: ProgressBar | None = None,
-    ) -> PipelineOutput:
+    ) -> dict:
         """
         Orchestrates reading from audio_filepaths in a streaming manner,
         transcribes them, and packs the results into a PipelineOutput.
@@ -318,7 +389,7 @@ class BasePipeline(PipelineInterface):
             options (list[ASRRequestOptions] | None): List of RequestOptions for each stream.
             progress_bar (ProgressBar | None): Progress bar to show the progress. Default is None.
         Returns:
-            PipelineOutput: A dataclass containing transcriptions and segments.
+            dict: A dictionary containing transcriptions and segments for each stream.
         """
         if progress_bar is not None and not isinstance(progress_bar, ProgressBar):
             raise ValueError("progress_bar must be an instance of ProgressBar.")
@@ -334,30 +405,19 @@ class BasePipeline(PipelineInterface):
         request_generator.set_audio_filepaths(audio_filepaths, options)
         request_generator.set_progress_bar(progress_bar)
 
+        pipeline_output = {}
         self.open_session()
         for requests in request_generator:
-            for request in requests:
-                if request.is_first:
-                    self.init_state(request.stream_id, request.options)
-            self.transcribe_step(requests)
-        output = self.pack_output()
+            step_outputs = self.transcribe_step(requests)
+            for step_output in step_outputs:
+                stream_id = step_output.stream_id
+                if stream_id not in pipeline_output:
+                    pipeline_output[stream_id] = {
+                        "text": "",
+                        "segments": [],
+                        "audio_filepath": request_generator.get_audio_filepath(stream_id),
+                    }
+                pipeline_output[stream_id]["text"] += step_output.final_transcript
+                pipeline_output[stream_id]["segments"].extend(step_output.final_segments)
         self.close_session()
-        return output
-
-    def pack_output(self) -> PipelineOutput:
-        """Pack the output from the internal state pool."""
-        texts, segments = [], []
-        for stream_id in sorted(self._state_pool):
-            state = self.get_state(stream_id)
-            if state.options.is_word_level_output():
-                attr_name = "itn_words" if state.options.enable_itn else "pnc_words"
-                state_segments = getattr(state, attr_name)
-                state_text = self.get_sep().join(word.text for word in state_segments)
-            else:
-                # Segment-level output branch
-                state_segments = getattr(state, "segments")
-                state_text = self.get_sep().join(segment.text for segment in state_segments)
-            texts.append(state_text)
-            segments.append(state_segments)
-
-        return PipelineOutput(texts=texts, segments=segments)
+        return pipeline_output

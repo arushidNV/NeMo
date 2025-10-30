@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+from typing import Any
+
 from torch import Tensor
 
 from nemo.collections.asr.inference.model_wrappers.asr_inference_wrapper import ASRInferenceWrapper
@@ -124,8 +126,11 @@ class CacheAwareASRInferenceWrapper(ASRInferenceWrapper):
         """
         self.asr_model.encoder.setup_streaming_params(chunk_size=chunk_size, shift_size=shift_size)
 
-    def stream_step(self) -> None:
-        """Executes a single streaming step."""
+    def stream_step(self, *args, **kwargs) -> Any:
+        """
+        Executes a single streaming step.
+        Each derived class must implement this method, with arguments and return types specific to that class.
+        """
         raise NotImplementedError(
             "`stream_step` method is not implemented. It is required for cache-aware transcribers."
         )

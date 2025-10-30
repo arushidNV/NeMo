@@ -17,7 +17,6 @@ import os
 
 import librosa
 
-from nemo.collections.asr.inference.pipelines.base_pipeline import PipelineOutput
 from nemo.collections.asr.inference.utils.constants import DEFAULT_OUTPUT_DIR_NAME
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 from nemo.collections.common.parts.preprocessing.manifest import get_full_path
@@ -80,14 +79,11 @@ def get_stem(file_path: str) -> str:
     return file_path.split('/')[-1]
 
 
-def dump_output(
-    audio_filepaths: list[str], output: PipelineOutput, output_filename: str, output_dir: str | None = None
-) -> None:
+def dump_output(output: dict, output_filename: str, output_dir: str | None = None) -> None:
     """
     Dump the transcriptions to a output file
     Args:
-        audio_filepaths: (list[str]) List of audio file
-        output (PipelineOutput): Pipeline output
+        output (dict): Pipeline output, structured as {stream_id: {"text": str, "segments": list}}
         output_filename: (str) Path to the output file
         output_dir: (str | None) Path to the output directory, if None, will write at the same level as the output file
     """
@@ -98,8 +94,10 @@ def dump_output(
 
     os.makedirs(output_dir, exist_ok=True)
     with open(output_filename, 'w') as fout:
-        for audio_filepath, text, segments in zip(audio_filepaths, output.texts, output.segments):
-
+        for stream_id, data in sorted(output.items(), key=lambda x: x[0]):
+            audio_filepath = data["audio_filepath"]
+            text = data["text"]
+            segments = data["segments"]
             stem = get_stem(audio_filepath)
             stem = os.path.splitext(stem)[0]
             json_filepath = os.path.join(output_dir, f"{stem}.json")

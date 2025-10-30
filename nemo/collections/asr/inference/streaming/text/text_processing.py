@@ -402,7 +402,7 @@ class StreamingTextProcessor:
             attr_name = "itn_words" if state.options.enable_itn else "pnc_words"
             words = getattr(state, attr_name)
             for word in words:
-                state.final_words.append(word.copy())
+                state.final_segments.append(word.copy())
                 state.final_transcript += word.text + self.sep
             state.final_transcript = state.final_transcript.rstrip(self.sep)
 

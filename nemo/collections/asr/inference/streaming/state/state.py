@@ -59,6 +59,9 @@ class StreamingState:
         self.timesteps = []
         self.confidences = []
 
+        # Predicted tokens for the current step
+        self.current_step_tokens = []
+
         # Last token and its index are used to detect overlap between the current and the previous output
         self.last_token = None
         self.last_token_idx = None
@@ -66,11 +69,11 @@ class StreamingState:
         # Tokens left in the right padding segment of the buffer
         self.incomplete_segment_tokens = []
 
-        # final_transcript, partial_transcript, final_words and final_segments will be sent to the client
+        # final_transcript, partial_transcript, current_step_transcript and final_segments will be sent to the client
         self.final_transcript = ""
         self.partial_transcript = ""
+        self.current_step_transcript = ""
         self.concat_with_space = True
-        self.final_words = []
         self.final_segments = []
 
         # Word-level ASR output attributes (cleared after cleanup_after_response):
@@ -156,14 +159,18 @@ class StreamingState:
             output: (dict) The output to update the state with
             skip: (int) The number of tokens to skip
         """
+        current_tokens = output["tokens"]
+        current_timesteps = output["timesteps"]
+        current_confidences = output["confidences"]
         if skip > 0:
-            self.tokens.extend(output["tokens"][skip:])
-            self.confidences.extend(output["confidences"][skip:])
-            self.timesteps = merge_timesteps(self.timesteps, output["timesteps"][skip:])
-        else:
-            self.tokens.extend(output["tokens"])
-            self.confidences.extend(output["confidences"])
-            self.timesteps = merge_timesteps(self.timesteps, output["timesteps"])
+            current_tokens = current_tokens[skip:]
+            current_timesteps = current_timesteps[skip:]
+            current_confidences = current_confidences[skip:]
+
+        self.current_step_tokens.extend(current_tokens)
+        self.tokens.extend(current_tokens)
+        self.confidences.extend(current_confidences)
+        self.timesteps = merge_timesteps(self.timesteps, current_timesteps)
 
     def update_state(self, completed_output: dict, eou_detected: bool) -> None:
         """
@@ -236,13 +243,14 @@ class StreamingState:
             self.pnc_words.clear()
             self.itn_words.clear()
             self.word_alignment.clear()
-            self.final_words.clear()
         else:
             self.segments.clear()
             self.processed_segment_mask.clear()
-            self.final_segments.clear()
-
+        
         self.final_transcript = ""
+        self.final_segments.clear()
+        self.current_step_transcript = ""
+        self.current_step_tokens.clear()
         self.concat_with_space = True
 
     def push_back_segment(
@@ -296,7 +304,7 @@ class StreamingState:
             return
 
         # concat_with_space is used to determine if the final transcript should be concatenated with a space
-        if len(self.final_words) == 0 and merge_first_word:
+        if len(self.final_segments) == 0 and merge_first_word:
             self.concat_with_space = False
         else:
             self.concat_with_space = True

@@ -87,7 +87,7 @@ def main(cfg):
     logging.info(f"RTFX: {rtfx:.2f} ({data_dur:.2f}s / {exec_dur:.2f}s)")
 
     # Dump the transcriptions to a output file
-    dump_output(audio_filepaths, output, cfg.output_filename, cfg.output_dir)
+    dump_output(output, cfg.output_filename, cfg.output_dir)
     logging.info(f"Transcriptions written to {cfg.output_filename}")
     logging.info("Done!")
 

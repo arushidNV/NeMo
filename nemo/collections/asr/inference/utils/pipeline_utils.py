@@ -21,12 +21,13 @@ import torch
 from omegaconf import DictConfig, open_dict
 from torch import Tensor
 
-from nemo.collections.asr.inference.utils.constants import BIG_EPSILON, SMALL_EPSILON
+from nemo.collections.asr.inference.utils.constants import BIG_EPSILON, SMALL_EPSILON, SENTENCEPIECE_UNDERSCORE
 from nemo.collections.asr.parts.preprocessing.features import normalize_batch
 from nemo.collections.asr.parts.utils.asr_confidence_utils import (
     get_confidence_aggregation_bank,
     get_confidence_measure_bank,
 )
+from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 
 
 def check_existance_of_required_attributes(obj: object, required_args: list[str]) -> None:
@@ -53,6 +54,23 @@ def normalize_features(features: Tensor, feature_lens: Tensor = None) -> Tensor:
         (Tensor) normalized features. Shape is torch.Size([B, C, T]).
     """
     return normalize_batch(features, feature_lens, "per_feature")[0]
+
+
+def ids_to_text_without_stripping(tokens: list[int], tokenizer: TokenizerSpec, sep: str = ' ') -> str:
+    """
+    Convert a list of token IDs to text without stripping.
+    Args:
+        tokens: (list[int]) List of token IDs.
+        tokenizer: (TokenizerSpec) Tokenizer.
+        sep: (str) Separator between words. Default is ' '.
+    Returns:
+        (str) Text.
+    """
+    pieces = tokenizer.ids_to_tokens(tokens)
+    text = "".join(
+        [(p.replace(SENTENCEPIECE_UNDERSCORE, sep) if p.startswith(SENTENCEPIECE_UNDERSCORE) else p) for p in pieces]
+    )
+    return text
 
 
 def memoize_normalization_mode():
