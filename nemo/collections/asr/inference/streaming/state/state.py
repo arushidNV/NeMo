@@ -246,7 +246,7 @@ class StreamingState:
         else:
             self.segments.clear()
             self.processed_segment_mask.clear()
-        
+
         self.final_transcript = ""
         self.final_segments.clear()
         self.current_step_transcript = ""

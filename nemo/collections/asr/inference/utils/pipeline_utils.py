@@ -21,7 +21,7 @@ import torch
 from omegaconf import DictConfig, open_dict
 from torch import Tensor
 
-from nemo.collections.asr.inference.utils.constants import BIG_EPSILON, SMALL_EPSILON, SENTENCEPIECE_UNDERSCORE
+from nemo.collections.asr.inference.utils.constants import BIG_EPSILON, SENTENCEPIECE_UNDERSCORE, SMALL_EPSILON
 from nemo.collections.asr.parts.preprocessing.features import normalize_batch
 from nemo.collections.asr.parts.utils.asr_confidence_utils import (
     get_confidence_aggregation_bank,
