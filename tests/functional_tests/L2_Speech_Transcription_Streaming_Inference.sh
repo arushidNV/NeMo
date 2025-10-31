@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo examples/asr/asr_streaming_inference/asr_streaming_infer.py \
-    --config-path=examples/asr/conf/asr_streaming_inference/ \
+    --config-path="../conf/asr_streaming_inference/" \
     --config-name=buffered_ctc.yaml \
     audio_file="/home/TestData/an4_transcribe/test_subset/" \
     output_filename="/tmp/buffered_ctc_test_res.json" \
@@ -23,7 +23,7 @@ coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo exampl
     asr_output_granularity=segment
 
 coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo examples/asr/asr_streaming_inference/asr_streaming_infer.py \
-    --config-path=examples/asr/conf/asr_streaming_inference/ \
+    --config-path="../conf/asr_streaming_inference/" \
     --config-name=buffered_rnnt.yaml \
     audio_file="/home/TestData/an4_transcribe/test_subset/" \
     output_filename="/tmp/buffered_rnnt_test_res.json" \
@@ -34,7 +34,7 @@ coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo exampl
     asr_output_granularity=segment
 
 coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo examples/asr/asr_streaming_inference/asr_streaming_infer.py \
-    --config-path=examples/asr/conf/asr_streaming_inference/ \
+    --config-path="../conf/asr_streaming_inference/" \
     --config-name=cache_aware_ctc.yaml \
     audio_file="/home/TestData/an4_transcribe/test_subset/" \
     output_filename="/tmp/cache_aware_ctc_test_res.json" \
@@ -45,7 +45,7 @@ coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo exampl
     asr_output_granularity=segment
 
 coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo examples/asr/asr_streaming_inference/asr_streaming_infer.py \
-    --config-path=examples/asr/conf/asr_streaming_inference/ \
+    --config-path="../conf/asr_streaming_inference/" \
     --config-name=cache_aware_rnnt.yaml \
     audio_file="/home/TestData/an4_transcribe/test_subset/" \
     output_filename="/tmp/cache_aware_rnnt_test_res.json" \
