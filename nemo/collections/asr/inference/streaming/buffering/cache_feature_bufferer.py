@@ -99,10 +99,14 @@ class CacheFeatureBufferer:
         """
         Add an extracted feature to `feature_buffer`
         Args:
-            feat_chunk (torch.Tensor): feature chunk
+            feat_chunk (torch.Tensor): feature chunk of shape (n_feat, chunk_len)
         """
-        self.feature_buffer[:, : -self.feature_chunk_len] = self.feature_buffer[:, self.feature_chunk_len :].clone()
-        self.feature_buffer[:, -self.feature_chunk_len :] = feat_chunk.clone()
+        chunk_len = feat_chunk.shape[-1]
+        if chunk_len > self.feature_buffer_len:
+            raise ValueError(f"feat_chunk ({chunk_len}) longer than buffer ({self.feature_buffer_len})")
+
+        self.feature_buffer[:, :-chunk_len].copy_(self.feature_buffer[:, chunk_len:])
+        self.feature_buffer[:, -chunk_len:].copy_(feat_chunk)
 
     def preprocess(
         self, audio_signal: torch.Tensor, right_padding: int = 0, expected_feat_len: int = None
