@@ -119,12 +119,14 @@ class BatchedCacheFeatureBufferer:
         """
         Reset the slots for the given slot_ids
         Args:
-            slot_ids (list[int]): list of slot ids
+            feat_chunk (torch.Tensor): feature chunk of shape (n_feat, chunk_len)
         """
-        slot_ids_tensor = torch.tensor(slot_ids, device=self.device, dtype=torch.long)
-        self.feature_buffer.index_fill_(0, slot_ids_tensor, self.ZERO_LEVEL_SPEC_DB_VAL)
-        for slot_id in slot_ids:
-            self.audio_bufferers[slot_id].reset()
+        chunk_len = feat_chunk.shape[-1]
+        if chunk_len > self.feature_buffer_len:
+            raise ValueError(f"feat_chunk ({chunk_len}) longer than buffer ({self.feature_buffer_len})")
+
+        self.feature_buffer[:, :-chunk_len].copy_(self.feature_buffer[:, chunk_len:])
+        self.feature_buffer[:, -chunk_len:].copy_(feat_chunk)
 
     def preprocess(
         self, audio_buffers: list[Tensor], right_paddings: Tensor, expected_feat_len: int
