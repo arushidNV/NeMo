@@ -67,19 +67,14 @@ class CacheAwareRNNTPipeline(BasePipeline):
 
     def init_parameters(self, cfg: DictConfig) -> None:
         """Initialize the parameters."""
-        print(f"[DEBUG] cfg.streaming.att_context_size from YAML: {cfg.streaming.att_context_size}")
-        
         if cfg.streaming.att_context_size is not None:
             self.asr_model.set_default_att_context_size(att_context_size=cfg.streaming.att_context_size)
-        
-        # Check what the model actually has after setting (asr_model is a wrapper, need to access the actual model's encoder)
-        model_att_context = self.asr_model.asr_model.encoder.att_context_size
-        print(f"[DEBUG] Model's actual att_context_size after set: {model_att_context}")
 
         self.sample_rate = cfg.streaming.sample_rate
         self.asr_output_granularity = cfg.asr_output_granularity
         self.pre_encode_cache_size = self.asr_model.get_pre_encode_cache_size()
         self.model_chunk_size = self.asr_model.get_chunk_size()
+        
         if isinstance(self.model_chunk_size, list):
             self.model_chunk_size = self.model_chunk_size[1]
 
@@ -283,7 +278,8 @@ class CacheAwareRNNTPipeline(BasePipeline):
         self.context_manager.reset_slots(stream_ids, eos_flags)
 
         # update the previous hypothesis and reset the previous hypothesis for the streams that has ended
-        for state, hyp, eos in zip(states, best_hyp, eos_flags):
+        for i, (state, hyp, eos) in enumerate(zip(states, best_hyp, eos_flags)):
+            print(f"[DEBUG hyp] Stream {stream_ids[i]}: eos={eos}, hyp_len={len(hyp) if hyp is not None else 0}")
             if eos:
                 state.reset_previous_hypothesis()
             else:
@@ -292,6 +288,7 @@ class CacheAwareRNNTPipeline(BasePipeline):
         # run greedy decoder for each frame-state-hypothesis tuple
         for frame, state, hyp in zip(frames, states, best_hyp):
             eou_detected = self.run_greedy_decoder(state, frame, hyp)
+            print(f"[DEBUG decoder] Stream {frame.stream_id}: eou={eou_detected}, partial_text='{state.text}'")
             if eou_detected:
                 self.bpe_decoder.decode_bpe_tokens(state)
                 state.cleanup_after_eou()

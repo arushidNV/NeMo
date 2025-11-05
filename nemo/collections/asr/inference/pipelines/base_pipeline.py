@@ -240,8 +240,10 @@ class BasePipeline(PipelineInterface):
             # state tokens represent all tokens accumulated since the EOU
             # incomplete segment tokens are the remaining tokens on the right side of the buffer after EOU
             all_tokens = state.tokens + state.incomplete_segment_tokens
+            print(f"[DEBUG] final, ids_to_text_without_stripping: {ids_to_text_without_stripping(all_tokens, tokenizer, word_separator)}")
             if len(all_tokens) > 0:
                 pt_string = ids_to_text_without_stripping(all_tokens, tokenizer, word_separator)
+                print(f"[DEBUG] pt_string: {pt_string}")
                 if leading_regex_pattern:
                     pt_string = re.sub(leading_regex_pattern, r'\1', pt_string)
                 state.partial_transcript = pt_string
