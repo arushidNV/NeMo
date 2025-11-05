@@ -279,7 +279,7 @@ class CacheAwareRNNTPipeline(BasePipeline):
 
         # update the previous hypothesis and reset the previous hypothesis for the streams that has ended
         for i, (state, hyp, eos) in enumerate(zip(states, best_hyp, eos_flags)):
-            print(f"[DEBUG hyp] Stream {stream_ids[i]}: eos={eos}, hyp_len={len(hyp) if hyp is not None else 0}")
+            hyp_len = len(hyp.y_sequence) if hyp is not None and hasattr(hyp, 'y_sequence') else 0
             if eos:
                 state.reset_previous_hypothesis()
             else:
@@ -288,7 +288,6 @@ class CacheAwareRNNTPipeline(BasePipeline):
         # run greedy decoder for each frame-state-hypothesis tuple
         for frame, state, hyp in zip(frames, states, best_hyp):
             eou_detected = self.run_greedy_decoder(state, frame, hyp)
-            print(f"[DEBUG decoder] Stream {frame.stream_id}: eou={eou_detected}, partial_text='{state.text}'")
             if eou_detected:
                 self.bpe_decoder.decode_bpe_tokens(state)
                 state.cleanup_after_eou()
