@@ -72,8 +72,8 @@ class CacheAwareRNNTPipeline(BasePipeline):
         if cfg.streaming.att_context_size is not None:
             self.asr_model.set_default_att_context_size(att_context_size=cfg.streaming.att_context_size)
         
-        # Check what the model actually has after setting
-        model_att_context = self.asr_model.encoder.att_context_size
+        # Check what the model actually has after setting (asr_model is a wrapper, need to access the actual model's encoder)
+        model_att_context = self.asr_model.asr_model.encoder.att_context_size
         print(f"[DEBUG] Model's actual att_context_size after set: {model_att_context}")
 
         self.sample_rate = cfg.streaming.sample_rate
