@@ -950,21 +950,48 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         # When att_context_size is not specified, it uses the default_att_context_size
         if att_context_size is None:
             att_context_size = self.att_context_size
+        
+        # ========== DEBUG: Input Parameters ==========
+        print("=" * 80)
+        print("🔍 CACHE-AWARE STREAMING CONFIGURATION DEBUG")
+        print("=" * 80)
+        print(f"📥 INPUT PARAMETERS:")
+        print(f"   chunk_s iize (override): {chunk_size}")
+        print(f"   shift_size (override): {shift_size}")
+        print(f"   att_context_size: {att_context_size}")
+        print(f"   att_context_style: {self.att_context_style}")
+        print(f"   n_layers: {self.n_layers}")
+        print(f"   subsampling_factor: {self.subsampling_factor}")
+        print(f"   conv_context_size: {self.conv_context_size}")
 
         if chunk_size is not None:
             if chunk_size < 1:
                 raise ValueError("chunk_size needs to be a number larger or equal to one.")
             lookahead_steps = chunk_size - 1
             streaming_cfg.cache_drop_size = chunk_size - shift_size
+            print(f"\n📐 LOOKAHEAD CALCULATION (manual chunk_size):")
+            print(f"   lookahead_steps = chunk_size - 1 = {chunk_size} - 1 = {lookahead_steps}")
+            print(f"   cache_drop_size = chunk_size - shift_size = {chunk_size} - {shift_size} = {streaming_cfg.cache_drop_size}")
         elif self.att_context_style == "chunked_limited":
             lookahead_steps = att_context_size[1]
             streaming_cfg.cache_drop_size = 0
+            print(f"\n📐 LOOKAHEAD CALCULATION (chunked_limited style):")
+            print(f"   lookahead_steps = att_context_size[1] = {lookahead_steps}")
+            print(f"   cache_drop_size = 0 (cache enabled)")
         elif self.att_context_style == "regular":
             lookahead_steps = att_context_size[1] * self.n_layers + self.conv_context_size[1] * self.n_layers
             streaming_cfg.cache_drop_size = lookahead_steps
+            print(f"\n📐 LOOKAHEAD CALCULATION (regular style):")
+            print(f"   lookahead_steps = att_context_size[1] × n_layers + conv_context_size[1] × n_layers")
+            print(f"                   = {att_context_size[1]} × {self.n_layers} + {self.conv_context_size[1]} × {self.n_layers}")
+            print(f"                   = {lookahead_steps}")
+            print(f"   cache_drop_size = {streaming_cfg.cache_drop_size}")
         else:
             streaming_cfg.cache_drop_size = 0
             lookahead_steps = None
+            print(f"\n📐 LOOKAHEAD CALCULATION (unknown style):")
+            print(f"   lookahead_steps = None")
+            print(f"   cache_drop_size = 0")
 
         if chunk_size is None:
             streaming_cfg.last_channel_cache_size = att_context_size[0] if att_context_size[0] >= 0 else max_context
@@ -978,34 +1005,71 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 )
             else:
                 streaming_cfg.last_channel_cache_size = left_chunks * chunk_size
+        
+        print(f"\n🧠 LEFT CONTEXT (CACHE) SIZE:")
+        print(f"   last_channel_cache_size = {streaming_cfg.last_channel_cache_size} tokens")
+        print(f"   (This is att_context_size[0] = {att_context_size[0]})")
 
         if hasattr(self.pre_encode, "get_sampling_frames"):
             sampling_frames = self.pre_encode.get_sampling_frames()
         else:
             sampling_frames = 0
+        
+        print(f"\n🎯 SAMPLING FRAMES (from pre_encode):")
+        print(f"   sampling_frames = {sampling_frames}")
 
         if isinstance(sampling_frames, list):
             streaming_cfg.chunk_size = [
                 sampling_frames[0] + self.subsampling_factor * lookahead_steps,
                 sampling_frames[1] + self.subsampling_factor * lookahead_steps,
             ]
+            print(f"\n📦 CHUNK SIZE CALCULATION (list-based):")
+            print(f"   chunk_size[0] = sampling_frames[0] + subsampling_factor × lookahead_steps")
+            print(f"                 = {sampling_frames[0]} + {self.subsampling_factor} × {lookahead_steps}")
+            print(f"                 = {streaming_cfg.chunk_size[0]} frames")
+            print(f"   chunk_size[1] = sampling_frames[1] + subsampling_factor × lookahead_steps")
+            print(f"                 = {sampling_frames[1]} + {self.subsampling_factor} × {lookahead_steps}")
+            print(f"                 = {streaming_cfg.chunk_size[1]} frames")
         else:
             streaming_cfg.chunk_size = sampling_frames * (1 + lookahead_steps)
+            print(f"\n📦 CHUNK SIZE CALCULATION (single value):")
+            print(f"   chunk_size = sampling_frames × (1 + lookahead_steps)")
+            print(f"              = {sampling_frames} × (1 + {lookahead_steps})")
+            print(f"              = {streaming_cfg.chunk_size} frames")
 
         if isinstance(sampling_frames, list):
             streaming_cfg.shift_size = [
                 sampling_frames[0] + sampling_frames[1] * (lookahead_steps - streaming_cfg.cache_drop_size),
                 sampling_frames[1] + sampling_frames[1] * (lookahead_steps - streaming_cfg.cache_drop_size),
             ]
+            print(f"\n➡️  SHIFT SIZE CALCULATION (list-based):")
+            print(f"   shift_size[0] = sampling_frames[0] + sampling_frames[1] × (lookahead_steps - cache_drop_size)")
+            print(f"                 = {sampling_frames[0]} + {sampling_frames[1]} × ({lookahead_steps} - {streaming_cfg.cache_drop_size})")
+            print(f"                 = {streaming_cfg.shift_size[0]} frames")
+            print(f"   shift_size[1] = sampling_frames[1] + sampling_frames[1] × (lookahead_steps - cache_drop_size)")
+            print(f"                 = {sampling_frames[1]} + {sampling_frames[1]} × ({lookahead_steps} - {streaming_cfg.cache_drop_size})")
+            print(f"                 = {streaming_cfg.shift_size[1]} frames")
         else:
             streaming_cfg.shift_size = sampling_frames * (1 + lookahead_steps - streaming_cfg.cache_drop_size)
+            print(f"\n➡️  SHIFT SIZE CALCULATION (single value):")
+            print(f"   shift_size = sampling_frames × (1 + lookahead_steps - cache_drop_size)")
+            print(f"              = {sampling_frames} × (1 + {lookahead_steps} - {streaming_cfg.cache_drop_size})")
+            print(f"              = {streaming_cfg.shift_size} frames")
 
         if isinstance(streaming_cfg.shift_size, list):
             streaming_cfg.valid_out_len = (
                 streaming_cfg.shift_size[1] - sampling_frames[1]
             ) // self.subsampling_factor + 1
+            print(f"\n✅ VALID OUTPUT LENGTH CALCULATION (list-based):")
+            print(f"   valid_out_len = (shift_size[1] - sampling_frames[1]) // subsampling_factor + 1")
+            print(f"                 = ({streaming_cfg.shift_size[1]} - {sampling_frames[1]}) // {self.subsampling_factor} + 1")
+            print(f"                 = {streaming_cfg.valid_out_len} tokens")
         else:
             streaming_cfg.valid_out_len = streaming_cfg.shift_size // self.subsampling_factor
+            print(f"\n✅ VALID OUTPUT LENGTH CALCULATION (single value):")
+            print(f"   valid_out_len = shift_size // subsampling_factor")
+            print(f"                 = {streaming_cfg.shift_size} // {self.subsampling_factor}")
+            print(f"                 = {streaming_cfg.valid_out_len} tokens")
 
         if hasattr(self.pre_encode, "get_streaming_cache_size"):
             streaming_cfg.pre_encode_cache_size = self.pre_encode.get_streaming_cache_size()
@@ -1021,6 +1085,10 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 streaming_cfg.drop_extra_pre_encoded = 0
         else:
             streaming_cfg.drop_extra_pre_encoded = streaming_cfg.pre_encode_cache_size // self.subsampling_factor
+        
+        print(f"\n🔧 PRE-ENCODE CACHE:")
+        print(f"   pre_encode_cache_size = {streaming_cfg.pre_encode_cache_size} frames")
+        print(f"   drop_extra_pre_encoded = {streaming_cfg.drop_extra_pre_encoded} tokens")
 
         for m in self.layers.modules():
             if hasattr(m, "_max_cache_len"):
@@ -1030,6 +1098,20 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                     m.cache_drop_size = streaming_cfg.cache_drop_size
 
         self.streaming_cfg = streaming_cfg
+        
+        # ========== DEBUG: FINAL SUMMARY ==========
+        print("\n" + "=" * 80)
+        print("📊 FINAL STREAMING CONFIGURATION SUMMARY")
+        print("=" * 80)
+        print(f"✨ LEFT CONTEXT SIZE (cache):    {streaming_cfg.last_channel_cache_size} tokens")
+        print(f"✨ RIGHT CONTEXT SIZE (lookahead): {lookahead_steps} tokens")
+        print(f"✨ CHUNK SIZE:                     {streaming_cfg.chunk_size} frames")
+        print(f"✨ SHIFT SIZE:                     {streaming_cfg.shift_size} frames")
+        print(f"✨ VALID OUTPUT LENGTH:            {streaming_cfg.valid_out_len} tokens per chunk")
+        print(f"✨ CACHE DROP SIZE:                {streaming_cfg.cache_drop_size}")
+        print(f"✨ PRE-ENCODE CACHE:               {streaming_cfg.pre_encode_cache_size} frames")
+        print(f"✨ DROP EXTRA PRE-ENCODED:         {streaming_cfg.drop_extra_pre_encoded} tokens")
+        print("=" * 80 + "\n")
 
     def get_initial_cache_state(self, batch_size=1, dtype=torch.float32, device=None, max_dim=0):
         if device is None:

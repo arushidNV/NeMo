@@ -87,6 +87,11 @@ class CacheAwareContextManager:
             self.cache_last_time,  # [17, B, 512, 8]
             self.cache_last_channel_len,  # B
         ) = self.cache_aware_model.get_initial_cache_state(self.num_slots)
+        
+        print(f"[DEBUG ContextManager] Initialized cache with shapes:")
+        print(f"  cache_last_channel: {self.cache_last_channel.shape}")
+        print(f"  cache_last_time: {self.cache_last_time.shape}")
+        print(f"  cache_last_channel_len: {self.cache_last_channel_len.shape}")
 
     def reset_slot(self, slot_idx: int) -> None:
         """
@@ -128,6 +133,12 @@ class CacheAwareContextManager:
 
             # iterate over layers
             tgt_slot_idx = mapping[slot_idx]
+            
+            # DEBUG: Print shapes before assignment
+            print(f"[DEBUG update_cache] Stream {stream_id}, slot {slot_idx} -> {tgt_slot_idx}")
+            print(f"  self.cache_last_channel.shape: {self.cache_last_channel.shape}")
+            print(f"  new_context.cache_last_channel.shape: {new_context.cache_last_channel.shape}")
+            
             for i in range(self.cache_last_channel.size(0)):
                 self.cache_last_channel[i][slot_idx] = new_context.cache_last_channel[i][tgt_slot_idx].clone()
                 self.cache_last_time[i][slot_idx] = new_context.cache_last_time[i][tgt_slot_idx].clone()

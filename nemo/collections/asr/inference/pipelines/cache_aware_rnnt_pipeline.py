@@ -62,13 +62,19 @@ class CacheAwareRNNTPipeline(BasePipeline):
         self.init_bpe_decoder()
         self.init_greedy_rnnt_decoder()
         self.init_endpointer()
-        self.init_text_processor(cfg, pnc_model, itn_model)
+        self.init_text_processor(cfg, itn_model)
         super().__init__()
 
     def init_parameters(self, cfg: DictConfig) -> None:
         """Initialize the parameters."""
+        print(f"[DEBUG] cfg.streaming.att_context_size from YAML: {cfg.streaming.att_context_size}")
+        
         if cfg.streaming.att_context_size is not None:
             self.asr_model.set_default_att_context_size(att_context_size=cfg.streaming.att_context_size)
+        
+        # Check what the model actually has after setting
+        model_att_context = self.asr_model.encoder.att_context_size
+        print(f"[DEBUG] Model's actual att_context_size after set: {model_att_context}")
 
         self.sample_rate = cfg.streaming.sample_rate
         self.asr_output_granularity = cfg.asr_output_granularity
@@ -271,7 +277,6 @@ class CacheAwareRNNTPipeline(BasePipeline):
             drop_left_context=self.drop_left_context,
             valid_out_len=self.valid_out_len,
         )
-        
 
         # update the cache and reset the cache slots for the streams that has ended
         self.context_manager.update_cache(stream_ids, new_context, mapping)
