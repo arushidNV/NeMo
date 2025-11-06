@@ -98,6 +98,13 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
         Returns:
             (tuple[list[Hypothesis], CacheAwareContext]) best hypothesis and new context.
         """
+        print(f"[DEBUG WRAPPER] cache_last_channel is None: {context.cache_last_channel is None}")
+        print(f"[DEBUG WRAPPER] cache_last_time is None: {context.cache_last_time is None}")
+        print(f"[DEBUG WRAPPER] cache_last_channel_len is None: {context.cache_last_channel_len is None}")
+        if context.cache_last_channel is not None:
+            print(f"[DEBUG WRAPPER] cache_last_channel.shape: {context.cache_last_channel.shape}")
+        if context.cache_last_time is not None:
+            print(f"[DEBUG WRAPPER] cache_last_time.shape: {context.cache_last_time.shape}")
         (
             encoded,
             encoded_len,

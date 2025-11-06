@@ -50,8 +50,12 @@ def get_audio_filepaths(audio_file: str, sort_by_duration: bool = True) -> list[
     audio_file = audio_file.strip()
     audio_file = make_abs_path(audio_file)
     if os.path.isdir(audio_file):
-        filepaths = filter(lambda x: x.endswith(".wav"), os.listdir(audio_file))
-        filepaths = [os.path.join(audio_file, x) for x in filepaths]
+        # Recursively search for .wav files in all subdirectories
+        filepaths = []
+        for root, dirs, files in os.walk(audio_file):
+            for file in files:
+                if file.endswith(".wav"):
+                    filepaths.append(os.path.join(root, file))
     elif audio_file.endswith(".wav"):
         filepaths = [audio_file]
     elif audio_file.endswith((".json", ".jsonl")):
