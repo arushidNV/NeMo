@@ -39,7 +39,7 @@ if polygraphy_imported:
 
 trt, trt_imported = safe_import("tensorrt")
 torch_tensorrt, _ = safe_import("torch_tensorrt")
-cudart, _ = safe_import("cuda.cudart")
+cudart, _ = safe_import("cuda.bindings.runtime")
 
 lock_sm = threading.Lock()
 
