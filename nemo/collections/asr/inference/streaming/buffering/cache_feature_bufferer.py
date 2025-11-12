@@ -44,7 +44,7 @@ class BatchedCacheFeatureBufferer:
         preprocessor_cfg: DictConfig,
         device: torch.device,
         fill_value: float = LOG_MEL_ZERO,
-        right_padding_ratio: float = 0.8,
+        right_padding_ratio: float = 1.0,
     ):
         """
         Args:
@@ -137,7 +137,7 @@ class BatchedCacheFeatureBufferer:
             right_paddings (Tensor): right paddings: right paddings are not zero for last frames
             expected_feat_len (int): expected feature length
         Returns:
-            tuple[Tensor, Tensor]: features and right paddings
+            tuple[Tensor, Tensor]: features and valid feature lengths
         """
         signals = torch.vstack(audio_buffers).to(self.device)  # B x T
         signals_len = torch.tensor([signals.shape[1]] * signals.shape[0], device=self.device, dtype=torch.long)  # B
@@ -147,7 +147,12 @@ class BatchedCacheFeatureBufferer:
         if features.shape[2] > expected_feat_len:
             features = features[:, :, :expected_feat_len]  # B x F x T
         right_padding = torch.floor(right_paddings / self.sample_rate / self.timestep_duration)  # B
-        return features, right_padding
+        
+        # Calculate valid feature lengths (total frames - padding frames)
+        feature_buffer_lens = torch.tensor([features.shape[2]] * features.shape[0], device=self.device, dtype=torch.long)
+        feature_buffer_lens = feature_buffer_lens - right_padding.long()
+        
+        return features, feature_buffer_lens
 
     def _update_feature_buffer(self, slot_ids: int, feat_chunk: Tensor) -> None:
         """
