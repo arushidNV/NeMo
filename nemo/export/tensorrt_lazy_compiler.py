@@ -221,7 +221,7 @@ class TRTEngine:
         if use_cuda_graph:
             if self.cuda_graph_instance is not None:
                 cuassert(cudart.cudaGraphLaunch(self.cuda_graph_instance, stream))
-                cuassert(cudart.cudaStreamSynchronize(stream))
+                torch.cuda.synchronize()
             else:
                 # do inference before CUDA graph capture
                 noerror = self.context.execute_async_v3(stream)
@@ -239,7 +239,7 @@ class TRTEngine:
                 self.logger.info("CUDA Graph captured!")
         else:
             noerror = self.context.execute_async_v3(stream)
-            cuassert(cudart.cudaStreamSynchronize(stream))
+            torch.cuda.synchronize()
             if not noerror:
                 raise ValueError("ERROR: inference failed.")
 
