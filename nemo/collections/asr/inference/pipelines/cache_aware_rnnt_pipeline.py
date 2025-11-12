@@ -128,9 +128,6 @@ class CacheAwareRNNTPipeline(BasePipeline):
         self.return_tail_result = cfg.return_tail_result
 
         self.request_type = RequestType.from_str(cfg.streaming.request_type)
-        if self.request_type is not RequestType.FRAME:
-            raise ValueError(f"Request type {self.request_type} is not supported for cache-aware streaming.")
-
     def init_greedy_rnnt_decoder(self) -> None:
         """Initialize the RNNT decoder."""
         check_existance_of_required_attributes(self, ['vocabulary', 'conf_func'])
