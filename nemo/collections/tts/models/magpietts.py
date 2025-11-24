@@ -23,10 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import soundfile as sf
 import torch
-import wandb
+try:
+    import wandb
+except ImportError:
+    from lightning.pytorch.loggers import TensorBoardLogger
+else:
+    from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from hydra.utils import instantiate
 from lightning.pytorch import Trainer
-from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch import nn
 from torch.utils.data import get_worker_info
