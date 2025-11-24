@@ -40,8 +40,10 @@ def setup_tokenizers(all_tokenizers_config, mode='train'):
     tokenizer_names = []
     for tokenizer_name in all_tokenizers_config:
         tokenizer_config = all_tokenizers_config[tokenizer_name]
-        if tokenizer_config._target_ == 'AutoTokenizer':
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.pretrained_model)
+        if tokenizer_config._target_ == 'AutoTokenizer' and tokenizer_name != "multilingual_sentencepiece":
+            tokenizer = AutoTokenizer.from_pretrained("/opt/riva/backends/cache/hub/models--google--byt5-small/snapshots/68377bdc18a2ffec8a0533fef03b1c513a4dd49d/")
+        elif tokenizer_config._target_ == 'AutoTokenizer' and tokenizer_name == "multilingual_sentencepiece":
+            tokenizer = AutoTokenizer.from_pretrained("/opt/riva/backends/cache/hub/models--bert-base-multilingual-uncased/snapshots/7cbf9a625e29989f6b9c6c2fa68234c304f7e38f/")
         elif tokenizer_config._target_ == 'T5Tokenizer':
             tokenizer = T5Tokenizer.from_pretrained(tokenizer_config.pretrained_model)
         else:

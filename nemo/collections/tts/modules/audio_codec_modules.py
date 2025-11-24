@@ -83,7 +83,7 @@ def get_up_sample_padding(kernel_size: int, stride: int) -> Tuple[int, int]:
 class SSLModel(NeuralModule):
     def __init__(self, slm_model_name):
         super().__init__()
-        self.ssl_model = AutoModel.from_pretrained(slm_model_name)
+        self.ssl_model = AutoModel.from_pretrained(slm_model_name, local_files_only=True)
 
     def forward(self, *args, **kwargs):
         return self.ssl_model(*args, **kwargs)
