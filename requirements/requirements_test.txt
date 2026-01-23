@@ -7,7 +7,8 @@ pytest
 pytest-httpserver
 pytest-mock
 pytest-runner
-ruamel.yaml
+ruamel.yaml==0.19.1
+ruamel.yaml.clib==0.2.15
 sphinx
 sphinxcontrib-bibtex
 wandb

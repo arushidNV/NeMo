@@ -16,7 +16,8 @@ pyannote.metrics
 pydub
 pyloudnorm
 resampy
-ruamel.yaml
+ruamel.yaml==0.19.1
+ruamel.yaml.clib==0.2.15
 sacrebleu
 scipy>=0.14
 soundfile
