@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import pprint
+import re
 import string
 import tempfile
 import time
@@ -100,6 +101,17 @@ def read_manifest(manifest_path):
 
 
 def process_text(input_text):
+    # Remove Arabic tashkeel (diacritics/harakat)
+    input_text = re.sub(r'[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]', '', input_text)
+    # Remove Arabic punctuation
+    input_text = re.sub(r'[،؟؛«»٪٫٬]', '', input_text)
+    # Remove Hindi-specific punctuation (danda, double danda)
+    input_text = re.sub(r'[।॥॰]', '', input_text)
+    # Remove Mandarin-specific punctuation
+    input_text = re.sub(r'[，。！？；：""''（）【】《》〈〉「」『』、…·～—–\u3000]', '', input_text)
+    # Remove Japanese-specific punctuation
+    input_text = re.sub(r'[。、！？「」『』（）【】〔〕・…‥〜ー\u3000\u30FB]', '', input_text)
+
     # Convert text to lowercase
     lower_case_text = input_text.lower()
 

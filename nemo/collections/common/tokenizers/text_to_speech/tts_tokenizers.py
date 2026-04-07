@@ -401,7 +401,7 @@ class HindiCharsTokenizer(BaseCharsTokenizer):
 
     _LOCALE = "hi-IN"
     _PUNCT_LIST = get_ipa_punctuation_list(_LOCALE)
-    _CHARSET_STR = get_grapheme_character_set(locale=_LOCALE, case="mixed")
+    _CHARSET_STR = get_grapheme_character_set(locale=_LOCALE, case="lower")
     _CHARSET_STR += string.ascii_lowercase
 
     def __init__(
@@ -445,6 +445,74 @@ class HindiCharsTokenizer(BaseCharsTokenizer):
                 logging.warning(f"Text: [{text}] contains unknown char: [{c}]. Symbol will be skipped.")
 
         # Remove trailing spaces
+        if cs:
+            while cs[-1] == space:
+                cs.pop()
+
+        if self.pad_with_space:
+            cs = [space] + cs + [space]
+
+        return [self._token2id[p] for p in cs]
+
+
+class ArabicCharsTokenizer(BaseCharsTokenizer):
+    """Arabic grapheme tokenizer (character-based, no phonemes).
+    Args:
+        punct: Whether to reserve grapheme for basic punctuation or not.
+        apostrophe: Whether to use apostrophe or not.
+        add_blank_at: Add blank to labels in the specified order ("last") or after tokens (any non None),
+            if None then no blank in labels.
+        pad_with_space: Whether to pad text with spaces at the beginning and at the end or not.
+        non_default_punct_list: List of punctuation marks which will be used instead default.
+        text_preprocessing_func: Text preprocessing function. Keeps Arabic unchanged.
+
+        Each Unicode code point becomes 1 token (letters, diacritics, and Arabic punct from ipa_lexicon).
+        Supports both upper and lower English letters (e.g. mixed-language text).
+
+        Input Text: مرحبا Hello
+        Chars: ['م', 'ر', 'ح', 'ب', 'ا', ' ', 'H', 'e', 'l', 'l', 'o']
+    """
+
+    _LOCALE = "ar-MSA"
+    _PUNCT_LIST = get_ipa_punctuation_list(_LOCALE)
+    _CHARSET_STR = get_grapheme_character_set(locale=_LOCALE, case="mixed")
+    _CHARSET_STR += string.ascii_letters
+
+    def __init__(
+        self,
+        chars=_CHARSET_STR,
+        punct=True,
+        apostrophe=True,
+        add_blank_at=None,
+        pad_with_space=False,
+        non_default_punct_list=_PUNCT_LIST,
+        text_preprocessing_func=any_locale_text_preprocessing,
+    ):
+        super().__init__(
+            chars=chars,
+            punct=punct,
+            apostrophe=apostrophe,
+            add_blank_at=add_blank_at,
+            pad_with_space=pad_with_space,
+            non_default_punct_list=non_default_punct_list,
+            text_preprocessing_func=text_preprocessing_func,
+        )
+
+    def encode(self, text):
+        """Encode Arabic text, handling diacritics and English (upper/lower) correctly."""
+        cs, space, tokens = [], self.tokens[self.space], set(self.tokens)
+
+        text = self.text_preprocessing_func(text)
+        for c in text:
+            if c == space and len(cs) > 0 and cs[-1] != space:
+                cs.append(c)
+            elif c in tokens and c != space:
+                cs.append(c)
+            elif (c in self.PUNCT_LIST) and self.punct:
+                cs.append(c)
+            elif c != space:
+                logging.warning(f"Text: [{text}] contains unknown char: [{c}]. Symbol will be skipped.")
+
         if cs:
             while cs[-1] == space:
                 cs.pop()
