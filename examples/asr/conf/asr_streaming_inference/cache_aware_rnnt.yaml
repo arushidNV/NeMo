@@ -98,6 +98,7 @@ streaming:
   chunk_size_in_secs: null                    # Amount of audio to load for each streaming step, e.g., 0.08s for FastConformer. Set to `null` for using default size equal to 1+lookahead frames.
   request_type: frame                         # Type of request: frame or feature_buffer
   num_slots: 256                             # Number of slots in the context manager: must be >= batch_size
+  blank_penalty: 0.0                         # WAR A: value subtracted from the RNNT blank-token logit at every greedy argmax; compensates for decoder emission lag in cache-disabled streaming. 0.0 = disabled.
 
 
 # ========================

@@ -149,6 +149,40 @@ class CacheAwareRNNTPipeline(BasePipeline):
 
         self.request_type = RequestType.from_str(cfg.streaming.request_type)
 
+        # WAR A: RNNT blank-logit penalty (inference-time). Counteracts decoder
+        # emission lag in cache-disabled streaming by subtracting a positive
+        # constant from the blank-token logit at every greedy argmax.
+        blank_penalty = float(cfg.streaming.get("blank_penalty", 0.0) or 0.0)
+        if blank_penalty != 0.0:
+            try:
+                computer = self.asr_model.asr_model.decoding.decoding.decoding_computer
+            except AttributeError as exc:
+                logging.warning(
+                    "streaming.blank_penalty=%s requested but decoding_computer was not found "
+                    "(decoding strategy may not be greedy_batch with loop_labels). Penalty disabled. (%s)",
+                    blank_penalty,
+                    exc,
+                )
+            else:
+                if computer is None:
+                    logging.warning(
+                        "streaming.blank_penalty=%s requested but decoding_computer is None; penalty disabled.",
+                        blank_penalty,
+                    )
+                else:
+                    computer._blank_penalty = blank_penalty
+                    # The CUDA-graph capture path of the label-looping computer caches tensor
+                    # buffers that are incompatible with in-place logit modification, so we
+                    # disable CUDA graphs whenever a non-zero penalty is active.
+                    try:
+                        computer.disable_cuda_graphs()
+                    except Exception as exc:
+                        logging.debug("disable_cuda_graphs() not available on computer: %s", exc)
+                    logging.info(
+                        "[WAR A] Applied RNNT blank-logit penalty=%s (CUDA graphs disabled for decoder).",
+                        blank_penalty,
+                    )
+
     def init_greedy_rnnt_decoder(self) -> None:
         """Initialize the RNNT decoder."""
         check_existance_of_required_attributes(self, ['vocabulary', 'conf_func'])

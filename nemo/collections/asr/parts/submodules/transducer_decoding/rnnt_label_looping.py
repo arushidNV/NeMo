@@ -223,6 +223,11 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         self.decoder = decoder
         self.joint = joint
         self._blank_index = blank_index
+        # Constant subtracted from the blank-token logit before every greedy argmax.
+        # Used as an inference-time RNNT blank-logit penalty (WAR A) to compensate for
+        # decoder emission lag when running outside the trained streaming regime
+        # (e.g. cache-disabled streaming). 0.0 = no penalty (default behaviour).
+        self._blank_penalty: float = 0.0
         self.max_symbols = max_symbols_per_step
         self.preserve_alignments = preserve_alignments
         self.preserve_frame_confidence = preserve_frame_confidence
@@ -367,6 +372,8 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                 .squeeze(1)
                 .squeeze(1)
             )
+            if self._blank_penalty != 0.0:
+                logits[..., self._blank_index] = logits[..., self._blank_index] - self._blank_penalty
             scores, labels = logits.max(-1)
 
             if self.has_fusion_models():
@@ -418,6 +425,8 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                     .squeeze(1)
                     .squeeze(1)
                 )
+                if self._blank_penalty != 0.0:
+                    logits[..., self._blank_index] = logits[..., self._blank_index] - self._blank_penalty
                 # get labels (greedy) and scores from current logits, replace labels/scores with new
                 # labels[advance_mask] are blank, and we are looking for non-blank labels
                 more_scores, more_labels = logits.max(dim=-1)
@@ -1076,6 +1085,8 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             .squeeze(1)
             .squeeze(1)
         )
+        if self._blank_penalty != 0.0:
+            logits[..., self._blank_index] = logits[..., self._blank_index] - self._blank_penalty
         # same as: scores, labels = logits.max(-1)
         torch.max(logits, dim=-1, out=(self.state.scores, self.state.labels))
 
@@ -1148,6 +1159,8 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             .squeeze(1)
             .squeeze(1)
         )
+        if self._blank_penalty != 0.0:
+            logits[..., self._blank_index] = logits[..., self._blank_index] - self._blank_penalty
         # get labels (greedy) and scores from current logits, replace labels/scores with new
         # labels[advance_mask] are blank, and we are looking for non-blank labels
         more_scores, more_labels = logits.max(-1)
