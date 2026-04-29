@@ -50,6 +50,7 @@ from nemo.core.neural_types import (
     SpectrogramType,
 )
 from nemo.utils import logging
+from nemo.utils.nvtx import nvtx_decorator
 
 
 class StatelessTransducerDecoder(rnnt_abstract.AbstractRNNTDecoder, Exportable):
@@ -698,6 +699,7 @@ class RNNTDecoder(rnnt_abstract.AbstractRNNTDecoder, Exportable, AdapterModuleMi
 
         return g, target_length, states
 
+    @nvtx_decorator("RNNTDecoder.predict")
     def predict(
         self,
         y: Optional[torch.Tensor] = None,
@@ -1474,6 +1476,7 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
 
         self.hypotheses = None
 
+    @nvtx_decorator("RNNTJoint.forward")
     @typecheck()
     def forward(
         self,
@@ -1674,6 +1677,7 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
         """
         return self.pred(prednet_output)
 
+    @nvtx_decorator("RNNTJoint.joint_after_projection")
     def joint_after_projection(self, f: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         r"""
         Compute the joint step of the network after projection.

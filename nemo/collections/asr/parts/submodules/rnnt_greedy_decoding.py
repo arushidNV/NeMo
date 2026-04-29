@@ -47,6 +47,7 @@ from nemo.collections.common.parts.rnn import label_collate
 from nemo.core.classes import Typing, typecheck
 from nemo.core.neural_types import AcousticEncodedRepresentation, HypothesisType, LengthsType, NeuralType
 from nemo.utils import logging
+from nemo.utils.nvtx import nvtx_decorator
 
 
 def pack_hypotheses(
@@ -732,6 +733,7 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
             self._greedy_decode = RNNTGreedyDecodeCudaGraph(self.max_symbols, self)
             return self._greedy_decode != greedy_decode_prev
 
+    @nvtx_decorator("GreedyBatchedRNNTInfer.forward")
     @typecheck()
     def forward(
         self,
@@ -776,6 +778,7 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
 
         return (packed_result,)
 
+    @nvtx_decorator("GreedyBatchedRNNTInfer._greedy_decode_blank_as_pad_loop_labels")
     @torch.inference_mode()
     def _greedy_decode_blank_as_pad_loop_labels(
         self,

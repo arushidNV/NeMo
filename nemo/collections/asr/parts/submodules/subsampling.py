@@ -20,6 +20,7 @@ from torch.nn import LayerNorm
 
 from nemo.collections.asr.parts.submodules.causal_convs import CausalConv1D, CausalConv2D
 from nemo.utils import logging
+from nemo.utils.nvtx import nvtx_decorator
 
 
 class StackingSubsampling(torch.nn.Module):
@@ -382,6 +383,7 @@ class ConvSubsampling(torch.nn.Module):
     def get_streaming_cache_size(self):
         return [0, self.subsampling_factor + 1]
 
+    @nvtx_decorator("ConvSubsampling.forward")
     def forward(self, x, lengths):
         out_lengths = calc_length(
             lengths,

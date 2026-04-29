@@ -19,6 +19,8 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from nemo.utils.nvtx import nvtx_range
+
 
 class CacheAwareContext:
     """
@@ -119,23 +121,28 @@ class CacheAwareContextManager:
             new_context (CacheAwareContext): new context to update corresponding to the stream_ids
             mapping (dict): mapping between the old and new slots
         """
-        if self.cache_disabled:
-            return
+        with nvtx_range("CtxMgr_update_cache"):
+            if self.cache_disabled:
+                return
 
-        slot_ids_list = [self.streamidx2slotidx[sid] for sid in stream_ids]
-        slot_ids = torch.tensor(slot_ids_list, device=self.device, dtype=torch.long)
-        tgt_slot_ids = torch.tensor(
-            [mapping[sid] for sid in slot_ids_list],
-            device=self.device,
-            dtype=torch.long,
-        )
+            slot_ids_list = [self.streamidx2slotidx[sid] for sid in stream_ids]
+            slot_ids = torch.tensor(slot_ids_list, device=self.device, dtype=torch.long)
+            tgt_slot_ids = torch.tensor(
+                [mapping[sid] for sid in slot_ids_list],
+                device=self.device,
+                dtype=torch.long,
+            )
 
-        # In-place copy along batch/slot dimension
-        self.cache_last_channel.index_copy_(1, slot_ids, new_context.cache_last_channel.index_select(1, tgt_slot_ids))
-        self.cache_last_time.index_copy_(1, slot_ids, new_context.cache_last_time.index_select(1, tgt_slot_ids))
-        self.cache_last_channel_len.index_copy_(
-            0, slot_ids, new_context.cache_last_channel_len.index_select(0, tgt_slot_ids)
-        )
+            # In-place copy along batch/slot dimension
+            self.cache_last_channel.index_copy_(
+                1, slot_ids, new_context.cache_last_channel.index_select(1, tgt_slot_ids)
+            )
+            self.cache_last_time.index_copy_(
+                1, slot_ids, new_context.cache_last_time.index_select(1, tgt_slot_ids)
+            )
+            self.cache_last_channel_len.index_copy_(
+                0, slot_ids, new_context.cache_last_channel_len.index_select(0, tgt_slot_ids)
+            )
 
     def reset_slots(self, stream_ids: list[int], eos_flags: list[bool]) -> None:
         """
@@ -144,17 +151,18 @@ class CacheAwareContextManager:
             stream_ids (list[int]): list of stream ids
             eos_flags (list[bool]): list of eos flags indicating whether the stream has finished
         """
-        if self.cache_disabled:
-            return
+        with nvtx_range("CtxMgr_reset_slots"):
+            if self.cache_disabled:
+                return
 
-        if len(stream_ids) != len(eos_flags):
-            raise ValueError("stream_ids and eos_flags must have the same length")
+            if len(stream_ids) != len(eos_flags):
+                raise ValueError("stream_ids and eos_flags must have the same length")
 
-        if len(stream_ids) == 0:
-            return
+            if len(stream_ids) == 0:
+                return
 
-        # reset the slots for finished streams
-        self._reset_slots([self.streamidx2slotidx[sid] for sid, eos in zip(stream_ids, eos_flags) if eos])
+            # reset the slots for finished streams
+            self._reset_slots([self.streamidx2slotidx[sid] for sid, eos in zip(stream_ids, eos_flags) if eos])
 
     def get_context(self, stream_ids: list[int]) -> tuple[CacheAwareContext, dict]:
         """
@@ -165,33 +173,33 @@ class CacheAwareContextManager:
             context (CacheAwareContext): context for the given stream_ids
             mapping (dict): mapping between the cache and retrieved context
         """
+        with nvtx_range("CtxMgr_get_context"):
+            if len(stream_ids) == 0 or self.cache_disabled:
+                # Create a dummy context with None values
+                return CacheAwareContext(), {}
 
-        if len(stream_ids) == 0 or self.cache_disabled:
-            # Create a dummy context with None values
-            return CacheAwareContext(), {}
+            # if the stream_id is new, we need to assign a slot to it
+            for stream_id in stream_ids:
+                if stream_id not in self.streamidx2slotidx:
+                    if self.free_slots.empty():
+                        raise RuntimeError("No free slots available")
+                    slot_idx = self.free_slots.get()
+                    self.streamidx2slotidx[stream_id] = slot_idx
+                    self.slotidx2streamidx[slot_idx] = stream_id
 
-        # if the stream_id is new, we need to assign a slot to it
-        for stream_id in stream_ids:
-            if stream_id not in self.streamidx2slotidx:
-                if self.free_slots.empty():
-                    raise RuntimeError("No free slots available")
-                slot_idx = self.free_slots.get()
-                self.streamidx2slotidx[stream_id] = slot_idx
-                self.slotidx2streamidx[slot_idx] = stream_id
+            # get the cache for the particular stream_ids
+            slot_ids = [self.streamidx2slotidx[stream_id] for stream_id in stream_ids]
+            cache_last_channel = self.cache_last_channel[:, slot_ids, :, :]
+            cache_last_time = self.cache_last_time[:, slot_ids, :, :]
+            cache_last_channel_len = self.cache_last_channel_len[slot_ids]
 
-        # get the cache for the particular stream_ids
-        slot_ids = [self.streamidx2slotidx[stream_id] for stream_id in stream_ids]
-        cache_last_channel = self.cache_last_channel[:, slot_ids, :, :]
-        cache_last_time = self.cache_last_time[:, slot_ids, :, :]
-        cache_last_channel_len = self.cache_last_channel_len[slot_ids]
+            # create a context object
+            context = CacheAwareContext(
+                cache_last_channel=cache_last_channel,
+                cache_last_time=cache_last_time,
+                cache_last_channel_len=cache_last_channel_len,
+            )
 
-        # create a context object
-        context = CacheAwareContext(
-            cache_last_channel=cache_last_channel,
-            cache_last_time=cache_last_time,
-            cache_last_channel_len=cache_last_channel_len,
-        )
-
-        # mapping between cache and context
-        mapping = dict(zip(slot_ids, range(len(slot_ids))))
-        return context, mapping
+            # mapping between cache and context
+            mapping = dict(zip(slot_ids, range(len(slot_ids))))
+            return context, mapping

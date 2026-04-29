@@ -33,6 +33,7 @@ from nemo.collections.common.tokenizers.aggregate_tokenizer import AggregateToke
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.utils import logging
 from nemo.utils.enum import PrettyStrEnum
+from nemo.utils.nvtx import nvtx_range
 
 try:
     import kenlm
@@ -716,9 +717,12 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         """
         # Compute hypotheses
         with torch.inference_mode():
-            hypotheses_list = self.decoding(
-                encoder_output=encoder_output, encoded_lengths=encoded_lengths, partial_hypotheses=partial_hypotheses
-            )  # type: [List[Hypothesis]]
+            with nvtx_range("RNNTDecoding_decoding_call"):
+                hypotheses_list = self.decoding(
+                    encoder_output=encoder_output,
+                    encoded_lengths=encoded_lengths,
+                    partial_hypotheses=partial_hypotheses,
+                )  # type: [List[Hypothesis]]
 
             # extract the hypotheses
             hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
@@ -777,6 +781,11 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         Returns:
             A list of strings.
         """
+        # NVTX range wrapping the whole detokenize/text reconstruction pass.
+        nvtx_range_token = "RNNTDecoding_decode_hypothesis"
+        from nemo.utils.nvtx import nvtx_range_pop, nvtx_range_push
+
+        nvtx_range_push(nvtx_range_token)
         for hyp in hypotheses_list:
             # Extract the integer encoded hypothesis
             prediction = hyp.y_sequence
@@ -800,6 +809,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             if self.compute_hypothesis_token_set:
                 hyp.tokens = self.decode_ids_to_tokens(prediction)
 
+        nvtx_range_pop(nvtx_range_token)
         return hypotheses_list
 
     def compute_confidence(self, hypotheses_list: List[Hypothesis]) -> List[Hypothesis]:

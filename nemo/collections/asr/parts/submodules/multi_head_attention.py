@@ -42,6 +42,7 @@ import torch.nn.attention
 import torch.nn.functional as F
 
 from nemo.utils import avoid_float16_autocast_context
+from nemo.utils.nvtx import nvtx_decorator
 
 __all__ = [
     'RelPositionMultiHeadAttention',
@@ -201,6 +202,7 @@ class MultiHeadAttention(nn.Module):
         else:
             return out, cache
 
+    @nvtx_decorator("MHA.update_cache")
     def update_cache(self, key, value, query, cache):
         if cache is not None:
             key = value = torch.cat([cache, key], dim=1)
@@ -269,6 +271,7 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
         x = x[:, :, 1:].view(b, h, qlen, pos_len)  # (b, h, t1, t2)
         return x
 
+    @nvtx_decorator("RelPositionMultiHeadAttention.forward")
     def forward(self, query, key, value, mask, pos_emb, cache=None):
         """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
         Args:
@@ -1074,6 +1077,7 @@ class RelPositionalEncoding(PositionalEncoding):
         positions = torch.arange(length - 1, -length, -1, dtype=torch.float32, device=device).unsqueeze(1)
         self.create_pe(positions=positions, dtype=dtype)
 
+    @nvtx_decorator("RelPositionalEncoding.forward")
     def forward(self, x, cache_len=0):
         """Compute positional encoding.
         Args:

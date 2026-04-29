@@ -28,6 +28,7 @@ from nemo.collections.asr.parts.submodules.multi_head_attention import (
 from nemo.collections.asr.parts.utils.activations import Swish
 from nemo.collections.common.parts.utils import activation_registry
 from nemo.core.classes.mixins import AccessMixin
+from nemo.utils.nvtx import nvtx_decorator
 
 __all__ = ['ConformerConvolution', 'ConformerFeedForward', 'ConformerLayer']
 
@@ -157,6 +158,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         self.dropout = nn.Dropout(dropout)
         self.norm_out = LayerNorm(d_model)
 
+    @nvtx_decorator("ConformerLayer.forward")
     def forward(self, x, att_mask=None, pos_emb=None, pad_mask=None, cache_last_channel=None, cache_last_time=None):
         """
         Args:
@@ -317,6 +319,7 @@ class ConformerConvolution(nn.Module):
             bias=self.use_bias,
         )
 
+    @nvtx_decorator("ConformerConvolution.forward")
     def forward(self, x, pad_mask=None, cache=None):
         x = x.transpose(1, 2)
         x = self.pointwise_conv1(x)
@@ -379,6 +382,7 @@ class ConformerFeedForward(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.linear2 = nn.Linear(d_ff, d_model, bias=self.use_bias)
 
+    @nvtx_decorator("ConformerFeedForward.forward")
     def forward(self, x):
         x = self.linear1(x)
         x = self.activation(x)

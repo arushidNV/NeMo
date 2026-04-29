@@ -22,6 +22,7 @@ from nemo.collections.asr.inference.utils.context_manager import CacheAwareConte
 from nemo.collections.asr.models import EncDecHybridRNNTCTCModel, EncDecRNNTModel
 from nemo.collections.asr.parts.mixins.streaming import StreamingEncoder
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
+from nemo.utils.nvtx import nvtx_range
 
 
 class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
@@ -100,41 +101,44 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
         Returns:
             (tuple[list[Hypothesis], CacheAwareContext]) best hypothesis and new context.
         """
-        (
-            encoded,
-            encoded_len,
-            cache_last_channel,
-            cache_last_time,
-            cache_last_channel_len,
-        ) = self.asr_model.encoder.cache_aware_stream_step(
-            processed_signal=processed_signal,
-            processed_signal_length=processed_signal_length,
-            cache_last_channel=context.cache_last_channel,
-            cache_last_time=context.cache_last_time,
-            cache_last_channel_len=context.cache_last_channel_len,
-            keep_all_outputs=keep_all_outputs,
-            drop_extra_pre_encoded=drop_extra_pre_encoded,
-        )
-        new_context = CacheAwareContext(
-            cache_last_channel=cache_last_channel,
-            cache_last_time=cache_last_time,
-            cache_last_channel_len=cache_last_channel_len,
-        )
+        with nvtx_range("CARNNTWrapper_execute_step"):
+            with nvtx_range("CARNNTWrapper_encoder_cache_aware_stream_step"):
+                (
+                    encoded,
+                    encoded_len,
+                    cache_last_channel,
+                    cache_last_time,
+                    cache_last_channel_len,
+                ) = self.asr_model.encoder.cache_aware_stream_step(
+                    processed_signal=processed_signal,
+                    processed_signal_length=processed_signal_length,
+                    cache_last_channel=context.cache_last_channel,
+                    cache_last_time=context.cache_last_time,
+                    cache_last_channel_len=context.cache_last_channel_len,
+                    keep_all_outputs=keep_all_outputs,
+                    drop_extra_pre_encoded=drop_extra_pre_encoded,
+                )
+            new_context = CacheAwareContext(
+                cache_last_channel=cache_last_channel,
+                cache_last_time=cache_last_time,
+                cache_last_channel_len=cache_last_channel_len,
+            )
 
-        if drop_left_context:
-            # drop left context
-            encoded = encoded[:, :, drop_left_context:]
-            encoded_len = encoded_len - drop_left_context
+            if drop_left_context:
+                # drop left context
+                encoded = encoded[:, :, drop_left_context:]
+                encoded_len = encoded_len - drop_left_context
 
-        if valid_out_len and not keep_all_outputs:
-            # drop right context if any
-            encoded = encoded[:, :, :valid_out_len]
-            encoded_len = torch.ones_like(encoded_len) * valid_out_len
+            if valid_out_len and not keep_all_outputs:
+                # drop right context if any
+                encoded = encoded[:, :, :valid_out_len]
+                encoded_len = torch.ones_like(encoded_len) * valid_out_len
 
-        best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
-            encoded, encoded_len, return_hypotheses=True, partial_hypotheses=previous_hypotheses
-        )
-        return best_hyp, new_context
+            with nvtx_range("CARNNTWrapper_rnnt_decoder_predictions_tensor"):
+                best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
+                    encoded, encoded_len, return_hypotheses=True, partial_hypotheses=previous_hypotheses
+                )
+            return best_hyp, new_context
 
     def stream_step(
         self,
@@ -164,32 +168,32 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
             (tuple[list[Hypothesis], CacheAwareContext]) best hypothesis and new context.
         """
 
-        if processed_signal.device != self.device:
-            processed_signal = processed_signal.to(self.device)
+        with nvtx_range("CARNNTWrapper_stream_step"):
+            if processed_signal.device != self.device:
+                processed_signal = processed_signal.to(self.device)
 
-        if processed_signal_length.device != self.device:
-            processed_signal_length = processed_signal_length.to(self.device)
+            if processed_signal_length.device != self.device:
+                processed_signal_length = processed_signal_length.to(self.device)
 
-        if context is None:
-            # create a dummy context
-            context = CacheAwareContext()
+            if context is None:
+                # create a dummy context
+                context = CacheAwareContext()
 
-        with (
-            torch.amp.autocast(device_type=self.device_str, dtype=self.compute_dtype, enabled=self.use_amp),
-            torch.inference_mode(),
-            torch.no_grad(),
-        ):
+            with (
+                torch.amp.autocast(device_type=self.device_str, dtype=self.compute_dtype, enabled=self.use_amp),
+                torch.inference_mode(),
+                torch.no_grad(),
+            ):
+                best_hyp, new_context = self.execute_step(
+                    processed_signal,
+                    processed_signal_length,
+                    context,
+                    previous_hypotheses,
+                    drop_extra_pre_encoded,
+                    keep_all_outputs,
+                    drop_left_context,
+                    valid_out_len,
+                    prompt_vectors,
+                )
 
-            best_hyp, new_context = self.execute_step(
-                processed_signal,
-                processed_signal_length,
-                context,
-                previous_hypotheses,
-                drop_extra_pre_encoded,
-                keep_all_outputs,
-                drop_left_context,
-                valid_out_len,
-                prompt_vectors,
-            )
-
-        return best_hyp, new_context
+            return best_hyp, new_context

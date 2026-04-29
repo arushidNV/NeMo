@@ -38,6 +38,7 @@ from nemo.collections.asr.inference.streaming.text.text_processing import Stream
 from nemo.collections.asr.inference.utils.bpe_decoder import BPEDecoder
 from nemo.collections.asr.inference.utils.context_manager import CacheAwareContextManager
 from nemo.collections.asr.inference.utils.enums import RequestType
+from nemo.utils.nvtx import nvtx_range
 from nemo.collections.asr.inference.utils.pipeline_utils import (
     check_existance_of_required_attributes,
     get_leading_punctuation_regex_pattern,
@@ -139,8 +140,9 @@ class BasePipeline(PipelineInterface):
 
     def delete_state(self, stream_id: int) -> None:
         """Delete the state from the state pool."""
-        if stream_id in self._state_pool:
-            del self._state_pool[stream_id]
+        with nvtx_range("BasePipeline_delete_state"):
+            if stream_id in self._state_pool:
+                del self._state_pool[stream_id]
 
     def delete_states(self, stream_ids: Iterable[int]) -> None:
         """Delete states for a list of stream IDs."""
@@ -149,10 +151,11 @@ class BasePipeline(PipelineInterface):
 
     def init_state(self, stream_id: int, options: ASRRequestOptions) -> StreamingState:
         """Initialize the state of the stream"""
-        if stream_id not in self._state_pool:
-            state = self.create_state(options)
-            self._state_pool[stream_id] = state
-        return self._state_pool[stream_id]
+        with nvtx_range("BasePipeline_init_state"):
+            if stream_id not in self._state_pool:
+                state = self.create_state(options)
+                self._state_pool[stream_id] = state
+            return self._state_pool[stream_id]
 
     def reset_session(self) -> None:
         """Reset the frame buffer and internal state pool"""

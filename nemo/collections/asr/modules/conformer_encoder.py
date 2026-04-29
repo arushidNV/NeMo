@@ -55,6 +55,7 @@ from nemo.core.neural_types import (
     SpectrogramType,
 )
 from nemo.utils import logging
+from nemo.utils.nvtx import nvtx_decorator
 
 __all__ = ['ConformerEncoder', 'ConformerMultiLayerFeatureExtractor']
 
@@ -570,6 +571,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
 
         return (encoded, encoded_len, cache_last_channel_next, cache_last_time_next, cache_last_channel_next_len)
 
+    @nvtx_decorator("ConformerEncoder.forward")
     @typecheck()
     def forward(
         self,
@@ -613,6 +615,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
             bypass_pre_encode=bypass_pre_encode,
         )
 
+    @nvtx_decorator("ConformerEncoder.forward_internal")
     def forward_internal(
         self,
         audio_signal,
