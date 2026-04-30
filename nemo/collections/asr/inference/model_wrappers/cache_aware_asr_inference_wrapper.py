@@ -52,19 +52,10 @@ class CacheAwareASRInferenceWrapper(ASRInferenceWrapper):
     def get_initial_cache_state(self, batch_size: int) -> tuple[Tensor, Tensor, Tensor]:
         """
         Returns the initial cache state for the encoder.
-
-        The cache float tensors are allocated in the wrapper's compute_dtype
-        (matching what stream_step's autocast and the TRT engine consume).
-        At num_slots=1024, this halves the cache footprint from ~7.3 GiB
-        (fp32 default) to ~3.65 GiB (fp16) and removes a per-chunk implicit
-        dtype cast.
-
         Returns:
             (tuple[Tensor, Tensor, Tensor]) the initial cache state of the encoder.
         """
-        return self.asr_model.encoder.get_initial_cache_state(
-            batch_size=batch_size, dtype=self.compute_dtype
-        )
+        return self.asr_model.encoder.get_initial_cache_state(batch_size=batch_size)
 
     def get_drop_extra_pre_encoded(self) -> int:
         """
