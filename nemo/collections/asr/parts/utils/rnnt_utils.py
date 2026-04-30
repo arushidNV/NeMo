@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from nemo.collections.asr.parts.context_biasing.biasing_multi_model import BiasingRequestItemConfig
+from nemo.utils.nvtx import nvtx_range
 
 
 @dataclass
@@ -789,57 +790,65 @@ def batched_hyps_to_hypotheses(
     Returns:
         list of Hypothesis objects
     """
-    assert batch_size is None or batch_size <= batched_hyps.scores.shape[0]
-    num_hyps = batched_hyps.scores.shape[0] if batch_size is None else batch_size
-    # NB: clone is not necessary anymore, since CUDA graph decoder always returns an independent copy
-    scores = batched_hyps.scores.cpu()
-    current_lengths = batched_hyps.current_lengths.cpu()
-    transcript = batched_hyps.transcript.cpu()
-    timestamps = batched_hyps.timestamps.cpu()
-    hypotheses = [
-        Hypothesis(
-            score=scores[i].item(),
-            y_sequence=transcript[i, : current_lengths[i]],
-            timestamp=timestamps[i, : batched_hyps.current_lengths[i]],
-            token_duration=(
-                batched_hyps.token_durations[i, : batched_hyps.current_lengths[i]]
-                if batched_hyps.is_with_durations
-                else torch.empty(0)
-            ),
-            alignments=None,
-            dec_state=None,
-        )
-        for i in range(num_hyps)
-    ]
-    if alignments is not None:
-        # move all data to cpu to avoid overhead with moving data by chunks
-        alignment_lengths = alignments.current_lengths.cpu().tolist()
-        if alignments.with_alignments:
-            alignment_logits = alignments.logits.cpu()
-            alignment_labels = alignments.labels.cpu()
-        if alignments.with_frame_confidence:
-            frame_confidence = alignments.frame_confidence.cpu()
-
-        # for each hypothesis - aggregate alignment using unique_consecutive for time indices (~itertools.groupby)
-        for i in range(len(hypotheses)):
-            hypotheses[i].alignments = []
-            if alignments.with_frame_confidence:
-                hypotheses[i].frame_confidence = []
-            _, grouped_counts = torch.unique_consecutive(
-                alignments.timestamps[i, : alignment_lengths[i]], return_counts=True
-            )
-            start = 0
-            for timestamp_cnt in grouped_counts.tolist():
+    with nvtx_range("batched_hyps_to_hypotheses"):
+        assert batch_size is None or batch_size <= batched_hyps.scores.shape[0]
+        num_hyps = batched_hyps.scores.shape[0] if batch_size is None else batch_size
+        # NB: clone is not necessary anymore, since CUDA graph decoder always returns an independent copy
+        with nvtx_range("batched_hyps_to_hypotheses_d2h"):
+            scores = batched_hyps.scores.cpu()
+            current_lengths = batched_hyps.current_lengths.cpu()
+            transcript = batched_hyps.transcript.cpu()
+            timestamps = batched_hyps.timestamps.cpu()
+        with nvtx_range("batched_hyps_to_hypotheses_construct"):
+            # Use the CPU current_lengths everywhere -- the original code used
+            # batched_hyps.current_lengths[i] (still on GPU) on lines that picked
+            # the timestamp / token_duration slice, which forced an extra D2H sync
+            # per row. Reading from the cpu copy removes those syncs.
+            hypotheses = [
+                Hypothesis(
+                    score=scores[i].item(),
+                    y_sequence=transcript[i, : current_lengths[i]],
+                    timestamp=timestamps[i, : current_lengths[i]],
+                    token_duration=(
+                        batched_hyps.token_durations[i, : current_lengths[i]]
+                        if batched_hyps.is_with_durations
+                        else torch.empty(0)
+                    ),
+                    alignments=None,
+                    dec_state=None,
+                )
+                for i in range(num_hyps)
+            ]
+        if alignments is not None:
+            with nvtx_range("batched_hyps_to_hypotheses_alignments"):
+                # move all data to cpu to avoid overhead with moving data by chunks
+                alignment_lengths = alignments.current_lengths.cpu().tolist()
                 if alignments.with_alignments:
-                    hypotheses[i].alignments.append(
-                        [
-                            (alignment_logits[i, start + j], alignment_labels[i, start + j])
-                            for j in range(timestamp_cnt)
-                        ]
-                    )
+                    alignment_logits = alignments.logits.cpu()
+                    alignment_labels = alignments.labels.cpu()
                 if alignments.with_frame_confidence:
-                    hypotheses[i].frame_confidence.append(
-                        [frame_confidence[i, start + j] for j in range(timestamp_cnt)]
+                    frame_confidence = alignments.frame_confidence.cpu()
+
+                # for each hypothesis - aggregate alignment using unique_consecutive for time indices (~itertools.groupby)
+                for i in range(len(hypotheses)):
+                    hypotheses[i].alignments = []
+                    if alignments.with_frame_confidence:
+                        hypotheses[i].frame_confidence = []
+                    _, grouped_counts = torch.unique_consecutive(
+                        alignments.timestamps[i, : alignment_lengths[i]], return_counts=True
                     )
-                start += timestamp_cnt
-    return hypotheses
+                    start = 0
+                    for timestamp_cnt in grouped_counts.tolist():
+                        if alignments.with_alignments:
+                            hypotheses[i].alignments.append(
+                                [
+                                    (alignment_logits[i, start + j], alignment_labels[i, start + j])
+                                    for j in range(timestamp_cnt)
+                                ]
+                            )
+                        if alignments.with_frame_confidence:
+                            hypotheses[i].frame_confidence.append(
+                                [frame_confidence[i, start + j] for j in range(timestamp_cnt)]
+                            )
+                        start += timestamp_cnt
+        return hypotheses
