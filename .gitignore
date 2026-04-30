@@ -195,3 +195,7 @@ eval_results/
 
 # agents
 .claude/settings.local.json
+
+# Vendored nemo/export build artifacts
+nemo/export/plugins/*/build/
+nemo/export/__pycache__/

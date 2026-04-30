@@ -1,0 +1,268 @@
+================================================================================
+FP8 TensorRT Compiler - Debugging Log
+================================================================================
+Model: Cache-Aware Parakeet RNNT Encoder
+File: tensorrt_fp8_compiler.py
+Started: 2026-01-28
+
+================================================================================
+ISSUE #1: ModelOpt Segmentation Fault During FP8 Quantization
+================================================================================
+
+DATE: 2026-01-28
+
+SYMPTOM:
+---------
+Segmentation fault occurs when ModelOpt tries to quantize the ONNX model to FP8.
+The crash happens in libnvonnxparser.so.10 (TensorRT's ONNX parser used internally
+by ModelOpt).
+
+ERROR LOG:
+----------
+[modelopt][onnx] - INFO - Starting quantization process for model: /tmp/tmp99hs6ly0/model.onnx
+[modelopt][onnx] - INFO - Quantization mode: fp8
+[modelopt][onnx] - INFO - Preprocessing the model /tmp/tmp99hs6ly0/model.onnx
+[modelopt][onnx] - INFO - Model has dynamic inputs: ['audio_signal', 'length', 'cache_last_channel', 'cache_last_time', 'cache_last_channel_len']
+[Segmentation fault: address not mapped to object at address 0xfffffffffffffff8]
+
+BACKTRACE (key frames):
+-----------------------
+4  /usr/lib/x86_64-linux-gnu/libnvonnxparser.so.10
+5  /usr/lib/x86_64-linux-gnu/libnvonnxparser.so.10
+6  /usr/local/lib/python3.12/dist-packages/tensorrt/tensorrt.so
+
+RELATED WARNING (not the root cause):
+-------------------------------------
+Unsupported model IR version: 11, max supported IR version: 10
+- This warning also appears for FP16 builds, which work fine
+- The IR version mismatch is NOT causing the crash
+
+ANALYSIS:
+---------
+1. The crash occurs AFTER ModelOpt detects dynamic inputs
+2. ModelOpt internally uses TensorRT's ONNX parser
+3. The same ONNX model works fine for FP16 (no quantization needed)
+4. The issue is specific to ModelOpt's FP8 quantization process
+
+SUSPECTED CAUSES:
+-----------------
+1. Dynamic shapes handling bug in ModelOpt
+2. Cache-aware model has complex operators ModelOpt can't handle
+3. External data file path handling issues
+4. ModelOpt version compatibility issue
+
+WHERE IN CODE:
+--------------
+File: tensorrt_fp8_compiler.py
+Function: quantize_onnx_to_fp8()
+Line: ~336-342
+
+    modelopt_quantization.quantize(
+        onnx_path=preprocessed_path,
+        quantize_mode="fp8",
+        output_path=output_path,
+        use_external_data_format=True,
+        op_types_to_exclude=op_types_to_exclude,
+    )
+
+================================================================================
+FIX ATTEMPTS
+================================================================================
+
+ATTEMPT #1: Static Shapes (No Dynamic Inputs)
+---------------------------------------------
+Date: 2026-01-28
+Status: TESTING
+
+Description:
+Export ONNX with fixed/static shapes instead of dynamic shapes to see if
+ModelOpt's dynamic shape handling is the issue.
+
+Changes Made to tensorrt_fp8_compiler.py:
+-----------------------------------------
+1. Added `use_static_shapes` parameter to TrtFP8Compiler.__init__() (default: True)
+
+2. Modified _build_and_save() to:
+   - When use_static_shapes=True:
+     a) Create input tensors with MIN shapes from profiles
+     b) Export ONNX without dynamic_axes (static shapes)
+     c) Build TRT engine with static profile (min=opt=max)
+   - Logs which shapes are being used
+
+3. Updated trt_fp8_compile() defaults to include use_static_shapes=True
+
+Code Location:
+- Lines 611-612: New parameter in __init__
+- Lines 657: Store use_static_shapes flag  
+- Lines 803-860: Static shape logic in _build_and_save()
+- Lines 969-970: Default in trt_fp8_compile()
+
+Expected Outcome:
+If this works, it confirms ModelOpt has issues with dynamic shapes.
+The engine will only work for min shape inputs.
+
+To test with dynamic shapes later, set:
+  args={"use_static_shapes": False}
+
+Result: [PENDING - USER TESTING]
+
+--------------------------------------------------------------------------------
+
+ATTEMPT #2: Skip ModelOpt - Use Native TRT FP8
+----------------------------------------------
+Date: 2026-01-29
+Status: TESTING
+
+Description:
+Skip ModelOpt FP8 quantization entirely and use TensorRT's native FP8 support.
+This avoids the ModelOpt segfault but uses uncalibrated FP8 (TRT uses heuristic scales).
+
+Changes Made to tensorrt_fp8_compiler.py:
+-----------------------------------------
+1. Added `skip_modelopt` parameter to TrtFP8Compiler.__init__() (default: False)
+   - When True, skips ModelOpt quantization entirely
+   - Uses native TRT FP8 builder flag without calibrated scales
+
+2. Added `use_subprocess` parameter (default: True)
+   - Runs ModelOpt in a subprocess to isolate potential crashes
+   - If ModelOpt segfaults, subprocess dies but main process survives
+
+3. Modified _build_and_save() to:
+   - Skip FP8 quantization step when skip_modelopt=True
+   - Fall back to native TRT FP8 if ModelOpt fails and fallback=True
+
+4. Added polygraphy integration for ONNX parsing (same as FP16 compiler):
+   - Uses network_from_onnx_path() with NATIVE_INSTANCENORM flag
+   - Uses engine_bytes_from_network() with CreateConfig(fp8=True, fp16=True)
+
+Code Location:
+- Lines 68-76: Polygraphy imports
+- Lines 332-382: _run_modelopt_quantize_subprocess() function
+- Lines 385-452: Updated quantize_onnx_to_fp8() with subprocess support
+- Lines 455-609: Updated build_trt_engine_from_onnx() with polygraphy
+- Lines 800-801: New parameters in __init__
+- Lines 862-863: Store skip_modelopt and use_subprocess flags
+- Lines 1108-1135: Skip ModelOpt logic in _build_and_save()
+
+To use in niva_asr_model_cpp_fp8.py:
+  trt_fp8_compile(..., args={"skip_modelopt": True})
+
+Expected Outcome:
+- No ModelOpt segfault
+- TRT engine builds with native FP8 support
+- Accuracy may be slightly lower than calibrated FP8 (but often acceptable)
+
+Result: STILL CRASHING - Segfault in TensorRT ONNX parser during engine build
+        The crash is NOT in ModelOpt, it's in TRT's ONNX parser itself
+
+--------------------------------------------------------------------------------
+
+ATTEMPT #3: COMPLETE REWRITE - Match FP16 Compiler Exactly
+----------------------------------------------------------
+Date: 2026-01-29
+Status: TESTING
+
+Description:
+Completely rewrote tensorrt_fp8_compiler.py to match tensorrt_lazy_compiler.py
+(FP16 compiler) EXACTLY. The only difference is fp8=True in build_args.
+
+Key changes to match FP16 compiler:
+1. ONNX export WITHOUT forced opset version (use PyTorch default)
+2. Constant folding using polygraphy (not onnx-graphsurgeon)
+3. New _onnx_to_trt() method - EXACT COPY from FP16 compiler
+4. Engine loading using polygraphy's engine_from_bytes
+5. Same dtype mapping in trt_to_torch_dtype_dict()
+6. Removed all "static shapes" workaround code
+
+Changes Made to tensorrt_fp8_compiler.py:
+-----------------------------------------
+1. Updated polygraphy imports to include bytes_from_path, engine_from_bytes
+
+2. trt_to_torch_dtype_dict() - Exact copy from FP16 compiler
+
+3. TRTEngine.__init__() - Use polygraphy's engine_from_bytes (same as FP16)
+
+4. NEW: _onnx_to_trt() method - Exact copy from FP16 compiler with fp8=True:
+   ```python
+   build_args["tf32"] = True
+   build_args["fp16"] = True
+   build_args["fp8"] = True  # Only difference from FP16
+   network = network_from_onnx_path(onnx_path, flags=[trt.OnnxParserFlag.NATIVE_INSTANCENORM])
+   return engine_bytes_from_network(network, config=CreateConfig(profiles=profiles, **build_args))
+   ```
+
+5. _build_and_save() - Simplified to match FP16 compiler:
+   - Removed static shapes logic
+   - Use polygraphy's fold_constants (not onnx-graphsurgeon)
+   - Don't force opset version
+   - Call self._onnx_to_trt() for engine building
+
+Expected Outcome:
+Since FP16 compiler works with the exact same model, FP8 should now work
+because the only change is adding fp8=True to the build configuration.
+
+Result: [PENDING - USER TESTING]
+
+--------------------------------------------------------------------------------
+
+================================================================================
+ENVIRONMENT INFO
+================================================================================
+
+To collect when debugging:
+
+1. ModelOpt version:
+   pip show nvidia-modelopt
+
+2. TensorRT version:
+   python -c "import tensorrt; print(tensorrt.__version__)"
+
+3. ONNX Runtime version:
+   pip show onnxruntime
+
+4. PyTorch version:
+   python -c "import torch; print(torch.__version__)"
+
+5. CUDA version:
+   nvcc --version
+
+6. GPU info:
+   nvidia-smi
+
+================================================================================
+NOTES
+================================================================================
+
+- FP16/BF16 compilation works fine with the same model
+- The IR version 11 warning is benign for TensorRT builds
+- The segfault is in ModelOpt's internal use of TensorRT's ONNX parser
+- Cache-aware models have 5 inputs: audio_signal, length, cache_last_channel, 
+  cache_last_time, cache_last_channel_len
+- Model is NOT trained with FP8 QAT (Quantization-Aware Training)
+- Without QAT and without ModelOpt PTQ, TRT uses heuristic FP8 scales
+- Opset 19 is required for FP8 (opset 17 doesn't work)
+
+================================================================================
+CURRENT STATUS (2026-01-29)
+================================================================================
+
+FP8 compiler has been COMPLETELY REWRITTEN to match FP16 compiler exactly.
+The code now uses:
+- Same ONNX export (no forced opset)
+- Same constant folding (polygraphy)
+- Same TRT engine building (polygraphy with NATIVE_INSTANCENORM flag)
+- Same engine loading (polygraphy)
+
+Only difference: build_args includes fp8=True in addition to fp16=True
+
+If this still crashes, the issue is:
+- TensorRT itself crashes when fp8=True is set in CreateConfig
+- This would be a TensorRT bug, not a code issue
+
+NEXT STEPS:
+-----------
+1. Test with Attempt #3 (complete rewrite)
+2. If still fails with fp8=True, try with ONLY fp16=True to confirm FP16 works
+3. If FP16 works but FP8 crashes, file TensorRT bug report
+
+================================================================================

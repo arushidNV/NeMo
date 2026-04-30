@@ -1,0 +1,241 @@
+================================================================================
+FusedGemmSiluQuant TRT Plugin - Build & Test Guide
+================================================================================
+
+WHAT THIS DOES
+--------------
+Fuses [linear1/MatMul (FP8 GEMM) + Bias + SiLU + QuantizeLinear + DequantizeLinear]
+into a single CUDA kernel, outputting FP16 directly. Eliminates 84 kernel launches
+and 84 HBM round-trips per encoder inference.
+
+The plugin absorbs both the QuantizeLinear and downstream DequantizeLinear from the
+ONNX graph. This works around a known TensorRT ONNX-parser limitation where custom
+plugin FP8 output types are not propagated (causing "No matching rules for input
+operand types" errors on DequantizeLinear nodes).
+
+Target: Conformer ASR encoders (RNNT 1.1B, CTC 1.1B, CTC 0.6B)
+GPU: NVIDIA Hopper (H100, SM 9.0) or Ada (RTX 6000 Ada, SM 8.9). One .so supports both;
+     the plugin dispatches by device at runtime.
+
+
+PREREQUISITES
+-------------
+1. NVIDIA Docker container with:
+   - CUDA >= 12.0  (nvcc --version)
+   - TensorRT >= 10.0 (python3 -c "import tensorrt; print(tensorrt.__version__)")
+   - cmake >= 3.18 (cmake --version)
+
+2. CUTLASS 3.x (header-only, no compilation needed):
+   git clone https://github.com/NVIDIA/cutlass.git /opt/cutlass
+
+
+BUILD
+-----
+cd nemofork/NeMo/nemo/export/plugins/fused_gemm_silu_quant
+
+mkdir build && cd build
+
+# RTX 6000 Ada (SM89) only, no CUTLASS (use when CUTLASS is missing or incompatible):
+cmake .. -DBUILD_SM90=OFF
+make -j$(nproc)
+
+# Or: H100 + RTX 6000 (needs CUTLASS):
+# cmake .. -DBUILD_SM90=ON -DCUTLASS_DIR=/opt/cutlass
+# make -j$(nproc)
+
+# Output: build/libfused_gemm_silu_quant.so
+# With BUILD_SM90=OFF: SM89 only (plugin returns error on H100). No CUTLASS required.
+# With BUILD_SM90=ON:  SM90 + SM89; CUTLASS used only for SM90.
+
+
+TEST WITH TRTEXEC
+-----------------
+1. First, run ONNX surgery on your quantized model:
+
+   python3 onnx_surgery.py \
+       /path/to/quantized_model.onnx \
+       /path/to/model_with_plugin.onnx
+
+   # Use --dry-run first to see what would be replaced:
+   python3 onnx_surgery.py --dry-run /path/to/quantized_model.onnx /dev/null
+
+2. Build TRT engine with the plugin:
+
+   trtexec \
+       --plugins=build/libfused_gemm_silu_quant.so \
+       --onnx=/path/to/model_with_plugin.onnx \
+       --fp8 --fp16 \
+       --separateProfileRun \
+       --dumpProfile \
+       --exportProfile=profile_fused.json \
+       --exportLayerInfo=graph_fused.json
+
+3. Compare profiles:
+   - Check that FusedGemmSiluQuant appears in the profile
+   - Compare total time vs the baseline (without plugin)
+   - SiluMulCast layers should be gone
+
+
+INTEGRATE WITH RIVA/NEMO
+------------------------
+In tensorrt_fp8_compiler.py, load the plugin before engine build:
+
+    import ctypes
+    ctypes.CDLL("path/to/libfused_gemm_silu_quant.so")
+
+Then the ONNX surgery can be called as a Python function:
+
+    from nemo.export.plugins.fused_gemm_silu_quant.onnx_surgery import process_model
+    process_model(quantized_onnx_path, output_onnx_path)
+
+
+FILE STRUCTURE
+--------------
+fused_gemm_silu_quant/
+  kernel_common.h     - Shared GemmConfig and launch declarations (SM90/SM89)
+  kernel.cuh          - CUTLASS kernel for SM90: FP8 GEMM + Silu, FP16 output
+  kernel_sm90.cu      - SM90 entry points (launch_sm90, get_workspace_size_sm90)
+  kernel_sm90_stub.cpp- Stub for SM90 when CUTLASS is not available
+  kernel_sm89.cuh     - Custom fused kernel for SM89 (RTX 6000 Ada), FP16 output
+  kernel_sm89.cu      - SM89 implementation (compiled only for sm_89)
+  plugin.h            - TRT IPluginV3 interface declaration
+  plugin.cpp          - TRT plugin + creator; dispatches by device arch (C++)
+  CMakeLists.txt      - Build system (multi-arch)
+  onnx_surgery.py     - Python script to insert plugin nodes in ONNX
+  BUILD_AND_TEST.txt  - This file
+
+
+TESTING ON RTX 6000 ADA (SM89)
+------------------------------
+Use the same .so and trtexec steps as above. The plugin detects compute capability
+8.9 and runs the custom fused kernel (kernel_sm89.cuh). No CUTLASS is used on SM89.
+If you only have an RTX 6000 Ada machine, build with -DBUILD_SM90=OFF.
+
+
+================================================================================
+ROADMAP / OPTIMIZATION PLAN
+================================================================================
+
+PHASE 1: GET ENGINE BUILDING (current - done)
+----------------------------------------------
+Goal: TRT engine compiles and runs correctly with the plugin.
+
+Status: IMPLEMENTED
+- Plugin outputs FP16 (absorbs Q+DQ pair) to work around TRT ONNX-parser
+  limitation where custom plugin FP8 output types are not propagated
+- ONNX surgery absorbs 84 downstream DequantizeLinear nodes
+- SM89 kernel: hand-written tiled GEMM (FP32 compute on FP8 data) + SiLU -> FP16
+- SM90 kernel: CUTLASS 3.x FP8 tensor core GEMM + SiLU EVT epilogue -> FP16
+
+What to verify:
+  1. Engine builds without errors
+  2. ASR inference produces correct transcriptions
+  3. Latency is measured as a baseline
+
+
+PHASE 2: FP8 TENSOR CORE GEMM ON SM89 (future optimization)
+-------------------------------------------------------------
+Goal: Replace the scalar FP32 GEMM in the SM89 kernel with true FP8 tensor core GEMM.
+
+Problem: The current SM89 kernel loads FP8 data but computes in FP32 on CUDA cores.
+RTX 6000 Ada (SM89) HAS FP8 tensor cores (4th-gen) but the kernel doesn't use them.
+This leaves significant performance on the table (~2-4x realistic speedup potential).
+
+Approach options (pick one):
+
+  A. cuBLAS FP8 GEMM (easiest, recommended first attempt)
+     - Use cublasLtMatmul with CUDA_R_8F_E4M3 input types
+     - cuBLAS handles tensor core dispatch automatically
+     - SiLU + bias would need a separate epilogue kernel pass
+       (or use cublasLt epilogue callbacks if available)
+     - Pros: Easy to integrate, well-optimized, NVIDIA-maintained
+     - Cons: Adds cuBLAS dependency, may need separate SiLU pass
+             (2 kernel launches instead of 1, but both are fast)
+
+  B. CUTLASS 2.x/3.x for SM89
+     - CUTLASS does support SM89 FP8 tensor cores
+     - Would need cutlass::arch::Sm89 and non-TMA mainloop schedule
+     - Can fuse SiLU in epilogue (like SM90 path)
+     - Pros: Single fused kernel, no extra dependencies
+     - Cons: More complex setup, less documented than SM90
+
+  C. Raw PTX mma.sync instructions
+     - Write tensor core GEMM with inline PTX
+     - Pros: Maximum control, no dependencies
+     - Cons: Very difficult to write and maintain
+
+Performance expectation:
+  - RTX 6000 Ada peak: ~91 TFLOPS FP32 vs ~728 TFLOPS FP8
+  - Realistic improvement: 2-4x for these GEMM sizes (often memory-bandwidth limited)
+  - For [3840, 1024] x [1024, 4096] GEMM: ~2-3x expected
+
+Implementation plan:
+  1. Add cuBLAS handle to plugin (initialize in configurePlugin or attachToContext)
+  2. Replace the hand-written GEMM loop with cublasLtMatmul FP8 call
+  3. Add a small epilogue kernel for bias + SiLU + FP16 store
+  4. Benchmark against Phase 1 baseline
+  5. If CUTLASS SM89 EVT fusion is desired, implement as Option B
+
+
+PHASE 3: OPTIONAL PRECISION REFINEMENT (if needed)
+---------------------------------------------------
+Goal: Add FP8 round-trip inside kernel if accuracy testing shows degradation.
+
+Currently the plugin outputs raw FP16 from SiLU (no FP8 quantization noise).
+The model was calibrated with Q+DQ noise at these points. If ASR accuracy
+degrades vs the non-plugin FP8 baseline:
+
+  - Add FP8 round-trip in kernel: cast SiLU output to FP8 and back to FP16
+  - This preserves the FP8 quantization noise the model was calibrated with
+  - Still outputs FP16 (no TRT type inference issue)
+  - Kernel change is ~3 lines:
+      __nv_fp8_e4m3 fp8_tmp = __nv_fp8_e4m3(val * inv_scale);
+      float dq_val = float(fp8_tmp) * scale;
+      output[i] = __float2half(dq_val);
+
+Expected: NOT needed (removing quantization noise generally doesn't hurt),
+but the option exists if accuracy testing requires it.
+
+
+================================================================================
+ISSUES ENCOUNTERED AND RESOLVED
+================================================================================
+
+1. "broadcast dimensions must be conformable" (TRT build error)
+   - Cause: Plugin reported 2D output shape but encoder uses 3D tensors
+   - Fix: getOutputShapes propagates input rank (2D or 3D)
+
+2. "Plugin not found" (TRT runtime error)
+   - Cause: Plugin .so not loaded before engine build
+   - Fix: --plugins flag for trtexec, ctypes.CDLL for Python
+
+3. TypeError: unhashable type 'Node' (Python error in onnx_surgery.py)
+   - Cause: Using set() on ONNX GraphSurgeon Node objects
+   - Fix: Use identity comparison (len == 1 and consumers[0] is node)
+
+4. "No matching rules for input operand types" on DequantizeLinear (TRT build error)
+   - Cause: TRT ONNX parser ignores getOutputDataTypes for custom plugins,
+     defaults output to FP16. DequantizeLinear then sees DQ(FP16->FP16)
+     which has no implementation.
+   - Root cause: Known TRT limitation (GitHub issue #2935 and related)
+   - Fix: Plugin now outputs FP16 directly, absorbing both Q and DQ nodes.
+     getOutputDataTypes returns kHALF, supportsFormatCombination accepts kHALF
+     for output. ONNX surgery removes the downstream DequantizeLinear.
+
+
+TROUBLESHOOTING
+---------------
+- "CUTLASS not found": Set -DCUTLASS_DIR=/path/to/cutlass in cmake command
+- "nvcc fatal: unsupported gpu architecture 'sm_90'": Need CUDA >= 12.0 for H100 build
+- "nvcc fatal: unsupported gpu architecture 'sm_89'": Need CUDA >= 11.8 for RTX 6000 build
+- "undefined symbol" for launch_sm90/launch_sm89: Ensure kernel_sm90.cu and
+  kernel_sm89.cu are in the target and linked (see CMakeLists.txt)
+- "Plugin FusedGemmSiluQuant not found": Load .so before engine build
+  (--plugins flag for trtexec, ctypes.CDLL for Python)
+- CUTLASS template errors: Check CUTLASS version matches 3.x (not 2.x); only
+  kernel_sm90.cu uses CUTLASS
+
+NOTE: The kernel.cuh EVT template structure may need adjustment based on
+the exact CUTLASS version. The EVT API has evolved between CUTLASS releases.
+If you get template errors, check the CUTLASS examples/49 and examples/67
+for your specific version's syntax.

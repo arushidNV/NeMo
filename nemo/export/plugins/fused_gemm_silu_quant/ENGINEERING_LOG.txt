@@ -1,0 +1,337 @@
+================================================================================
+FusedGemmSiluQuant TRT Plugin — Engineering Log
+================================================================================
+Date range: Feb 2026
+GPU: NVIDIA RTX 6000 Ada (SM89, Ada Lovelace)
+TensorRT: 10.13.2.6
+CUDA: 13.0
+Container: Riva 2.25.0
+
+================================================================================
+1. ORIGINAL PROBLEM
+================================================================================
+
+Goal: Build a TensorRT engine for a Conformer ASR encoder (Parakeet RNNT 1.1B)
+with FP8 quantization on RTX 6000 Ada. A custom FusedGemmSiluQuant plugin
+fuses [MatMul + Add(bias) + SiLU + QuantizeLinear] into a single CUDA kernel
+to eliminate intermediate HBM round-trips (84 instances per encoder inference).
+
+Pipeline:
+  1. Export NeMo model → ONNX
+  2. ModelOpt FP8 quantization → quantized.onnx (with Q/DQ nodes)
+  3. ONNX surgery (onnx_surgery.py) → replace patterns with plugin nodes
+  4. TensorRT engine build (trtexec / polygraphy)
+  5. Engine deserialization and inference via Riva/Triton
+
+Pattern being replaced:
+  DQ(act) → MatMul → Add(bias) → Sigmoid → Mul(SiLU) → QuantizeLinear
+  ↓
+  FusedGemmSiluQuant(fp8_act, fp8_weight, bias) → fp8_output
+
+================================================================================
+2. ERRORS ENCOUNTERED AND SOLUTIONS
+================================================================================
+
+ERROR #1: "broadcast dimensions must be conformable"
+------------------------------------------------------------------------
+When:     TRT engine build (trtexec)
+Where:    /layers.0/Add node — residual addition after the plugin
+Message:  "broadcast dimensions must be conformable"
+
+Root cause:
+  Plugin's getOutputShapes() returned 2D output [M, N] but the Conformer
+  encoder uses 3D tensors [batch, seq, hidden]. The downstream residual Add
+  node saw shape [M, N] vs [batch, seq, hidden] → broadcast failure.
+
+Fix:
+  Changed getOutputShapes() in plugin.cpp to propagate the input rank:
+    - If input is 3D [batch, seq, K] → output is 3D [batch, seq, N]
+    - If input is 2D [M, K] → output is 2D [M, N]
+
+Status: RESOLVED
+
+
+ERROR #2: "Plugin not found"
+------------------------------------------------------------------------
+When:     TRT engine build
+Message:  Plugin FusedGemmSiluQuant not found
+
+Root cause:
+  The plugin .so was not loaded before TRT tried to parse the ONNX model.
+
+Fix:
+  Load the .so via ctypes.CDLL() before engine build, or pass
+  --plugins=libfused_gemm_silu_quant.so to trtexec.
+
+Status: RESOLVED
+
+
+ERROR #3: TypeError: unhashable type 'Node'
+------------------------------------------------------------------------
+When:     Running onnx_surgery.py --analyze-quantized
+Message:  TypeError: unhashable type: 'Node'
+
+Root cause:
+  ONNX GraphSurgeon Node objects are not hashable. The code used
+  set(act_consumers) == {matmul_node} which tried to put Nodes into a set.
+
+Fix:
+  Changed from set comparison to identity check:
+    len(consumers) == 1 and consumers[0] is matmul_node
+
+Status: RESOLVED
+
+
+ERROR #4: "No matching rules for input operand types" on DequantizeLinear
+------------------------------------------------------------------------
+When:     TRT engine build (trtexec), during Myelin compilation
+Message:  [type.cpp:infer_type:178] Could not infer output types for operation:
+          dequantize: ...DequantizeLinear_Output-(f16[32,120,4096]...)
+          No matching rules found for input operand types
+
+Root cause:
+  Known TensorRT ONNX-parser limitation (GitHub issue #2935 and related):
+  TRT's ONNX parser IGNORES the getOutputDataTypes() return value for custom
+  IPluginV3 plugins. It defaults the plugin output to FP16 regardless of what
+  the plugin declares. The downstream DequantizeLinear node expected FP8 input
+  but got FP16 → "No matching rules".
+
+  We verified:
+  - plugin.cpp getOutputDataTypes() correctly returned kFP8
+  - ONNX value_info was correctly set to FLOAT8E4M3FN (verified after save)
+  - TRT still treated the plugin output as f16 internally
+
+  This was confirmed as a known TRT limitation where the ONNX parser ignores
+  custom plugin output types for type inference.
+
+Fix (Approach: Absorb Q+DQ, output FP16):
+  Instead of fighting TRT's type inference, we changed the plugin to output
+  FP16 directly and absorb BOTH the QuantizeLinear AND the downstream
+  DequantizeLinear from the ONNX graph:
+
+  1. kernel_sm89.cuh: Output changed from __nv_fp8_e4m3 to __half
+     - Removed FP8 cast and scale multiply at the end
+     - Stores __float2half(silu_val) directly
+
+  2. kernel.cuh (SM90 CUTLASS): ElementD changed from float_e4m3_t to half_t
+     - EVT simplified: removed scale multiply + FP8 cast
+     - Root EVT is now Silu(BiasAdd) → FP16 store
+
+  3. plugin.cpp:
+     - getOutputDataTypes() returns kHALF instead of kFP8
+     - supportsFormatCombination() output accepts kHALF
+
+  4. onnx_surgery.py:
+     - Added _find_downstream_dq() to locate DQ after each QuantizeLinear
+     - replace_with_plugin() now absorbs the downstream DQ node
+     - Plugin output tensor is the DQ's output tensor (auto-connects consumers)
+     - Output dtype set to FLOAT16
+     - _set_plugin_output_value_info_fp16() replaces the old FP8 version
+
+Status: RESOLVED — DequantizeLinear error eliminated
+
+
+ERROR #5: "Assertion src != nullptr || count == 0 failed" (serialization)
+------------------------------------------------------------------------
+When:     TRT engine serialization (after successful build)
+Where:    archiveRecorder.cpp::record::33
+Message:  Error Code 2: Internal Error (Assertion src != nullptr || count == 0)
+          Invalid Engine. Please ensure the engine was built correctly
+
+Root cause:
+  getFieldsToSerialize() returned a PluginFieldCollection with a PluginField
+  whose data pointer was nullptr but count was 1:
+    {"output_scale", nullptr, kFLOAT32, 1}  // nullptr!
+  TRT's serializer tried to memcpy from null → assertion failure.
+
+Fix:
+  Changed getFieldsToSerialize() to use per-instance member variables that
+  point to the actual data:
+    serialize_fields_.push_back({"output_scale", &output_scale_, kFLOAT32, 1});
+  Added serialize_fields_ and serialize_collection_ as member variables in
+  the plugin class (plugin.h).
+
+Status: RESOLVED — engine now serializes successfully
+
+
+ERROR #6: "Cannot find plugin" during deserialization (namespace mismatch)
+------------------------------------------------------------------------
+When:     TRT engine deserialization (runtime)
+Message:  Cannot find plugin: FusedGemmSiluQuantfused_fp8, version: 1,
+          namespace:fused_fp8
+
+Root cause (TWO sub-issues):
+
+  Sub-issue A: Plugin namespace mismatch
+    The ONNX surgery set plugin_namespace="fused_fp8" as a node attribute.
+    TRT serialized the engine with this namespace. But the plugin creator
+    was registered with empty namespace "" (REGISTER_TENSORRT_PLUGIN always
+    registers under ""). At deserialization, TRT looked for namespace
+    "fused_fp8" but only "" existed.
+
+    Fix: Changed onnx_surgery.py to use plugin_namespace="" (empty string).
+    Changed plugin.h PLUGIN_NAMESPACE from "fused_fp8" to "".
+    Required engine rebuild (namespace is baked into serialized engine).
+
+  Sub-issue B: Plugin .so not loaded before deserialization
+    TRT engine build happens in one Python process, but deserialization
+    happens in Triton's Python backend (niva_asr_model_cpp_fp8.py).
+    The ctypes.CDLL() call was only in tensorrt_fp8_compiler.py's build
+    path, not in the Triton model script.
+
+    Fix: Added ctypes.CDLL + initFusedGemmSiluQuantPlugin() call at the
+    top of niva_asr_model_cpp_fp8.py (import-time loading).
+
+  Sub-issue C: V3 plugin registration not visible in Python API
+    plugin_creator_list in Python only shows V2 (IPluginCreator) plugins.
+    Our IPluginCreatorV3One plugin was always registered but invisible in
+    that list. Confirmed via:
+      reg.get_creator('FusedGemmSiluQuant', '1', '') → FOUND (V3One object)
+    This was a red herring that wasted debugging time.
+
+  Sub-issue D: REGISTER_TENSORRT_PLUGIN static init not reliable via dlopen
+    The static PluginRegistrar created by REGISTER_TENSORRT_PLUGIN inside a
+    C++ namespace did not reliably trigger registration when loaded via
+    ctypes.CDLL / dlopen. The dual-registry problem: the plugin .so and the
+    Python tensorrt module loaded separate instances of libnvinfer.so, each
+    with its own PluginRegistry singleton.
+
+    Fix: Added explicit C init function in plugin.cpp:
+      extern "C" int initFusedGemmSiluQuantPlugin() {
+          static FusedGemmSiluQuantCreator creator;
+          getPluginRegistry()->registerCreator(creator, "");
+          return 0;
+      }
+    Python code calls lib.initFusedGemmSiluQuantPlugin() after ctypes.CDLL().
+    Also moved REGISTER_TENSORRT_PLUGIN outside the namespace with a
+    using declaration (as fallback for trtexec --plugins usage).
+
+Status: RESOLVED — engine deserializes and runs
+
+
+ERROR #7: Empty transcripts (numerical issue — CURRENT)
+------------------------------------------------------------------------
+When:     Inference produces empty/wrong ASR transcripts
+Message:  No error — model runs but outputs nothing
+
+Root cause (diagnosed but not yet fixed):
+  The FP8 Q/DQ pattern in ModelOpt uses SCALED FP8 values:
+    QuantizeLinear:   fp8_val = round(original_value / scale)
+    DequantizeLinear: float_val = fp8_val * scale
+
+  Our plugin bypasses the input DQ nodes and feeds raw FP8 values to the
+  kernel. The kernel does float(fp8_val) but does NOT multiply by the DQ
+  scale. Therefore:
+    - Activation values are off by factor ~0.1x (act DQ scale = 0.1048)
+    - Weight values are off by per-channel scale factors
+    - GEMM output is completely wrong → garbage activations → empty transcripts
+
+  Verified:
+    Act DQ scale = 0.1048583984375 (NOT 1.0)
+    Weight DQ scales = per-channel array (NOT scalar, NOT 1.0)
+
+  The plugin's input wiring is correct (takes QuantizeLinear_Output tensors),
+  but the scaling is missing.
+
+================================================================================
+3. CURRENT STATUS AND NEXT STEPS
+================================================================================
+
+WHAT WORKS:
+  ✓ Plugin .so builds correctly (SM89)
+  ✓ ONNX surgery finds and replaces 84 patterns
+  ✓ Downstream DQ nodes are absorbed (plugin outputs FP16)
+  ✓ TRT engine builds successfully (~570 seconds)
+  ✓ Engine serialization works (getFieldsToSerialize fixed)
+  ✓ Engine deserialization works (namespace + explicit init fixed)
+  ✓ Plugin loads and registers in Triton/Riva Python backend
+  ✓ Inference runs without crashes
+
+WHAT DOESN'T WORK:
+  ✗ Numerical correctness — empty transcripts due to missing DQ scales
+
+FIX NEEDED (Option B — apply DQ scales inside kernel):
+  The plugin currently takes 3 inputs:
+    [0] activation FP8, [1] weight FP8, [2] bias FP16
+
+  Change to 5 inputs:
+    [0] activation FP8, [1] weight FP8, [2] bias FP16,
+    [3] act_scale FP32 (scalar), [4] wt_scale FP32 (per-channel [N] or [K])
+
+  Files to modify:
+  1. onnx_surgery.py:
+     - Extract activation DQ scale (scalar initializer) and weight DQ scales
+       (per-channel initializer) from the upstream DQ nodes
+     - Pass them as plugin inputs [3] and [4]
+
+  2. plugin.cpp:
+     - getNbInputs: was implicitly 3, now logically 5
+     - configurePlugin: accept 5 inputs
+     - supportsFormatCombination: inputs 3,4 are FP32 linear
+     - getOutputShapes: unchanged (still derives from input 0)
+
+  3. plugin.h:
+     - Update input documentation
+
+  4. kernel_sm89.cuh:
+     - Accept act_scale (scalar float) and wt_scale (float* array [N])
+     - After FP8→float conversion, multiply:
+         A_tile[r][c] = fp8_to_float(A[...]) * act_scale;
+         B_tile[r][c] = fp8_to_float(B[...]) * wt_scale[col];
+
+  Performance impact: Minimal — two extra float multiplies per element load.
+  The DQ scales are small tensors (scalar + [4096] array = 16KB) that fit
+  in L1/L2 cache easily.
+
+FUTURE OPTIMIZATION (Phase 2 — from BUILD_AND_TEST.txt roadmap):
+  Replace scalar FP32 GEMM in SM89 kernel with cuBLAS FP8 tensor core GEMM
+  for ~2-4x speedup on the GEMM itself.
+
+================================================================================
+4. KEY LEARNINGS
+================================================================================
+
+1. TRT ONNX parser ignores getOutputDataTypes() for custom IPluginV3 plugins.
+   Workaround: output FP16 and absorb downstream DQ in the plugin.
+
+2. REGISTER_TENSORRT_PLUGIN static initialization is unreliable when .so is
+   loaded via ctypes.CDLL/dlopen. Use explicit extern "C" init function.
+
+3. IPluginCreatorV3One plugins don't appear in Python's plugin_creator_list
+   (V2-only). Use reg.get_creator(name, version, namespace) to verify.
+
+4. Plugin namespace in ONNX node must match creator's registered namespace.
+   REGISTER_TENSORRT_PLUGIN always registers under "" (empty).
+
+5. getFieldsToSerialize() must return PluginField entries with non-null data
+   pointers. Null data + count>0 causes serialization assertion failure.
+
+6. FP8 E4M3 in ModelOpt Q/DQ patterns uses SCALED values, not raw
+   floating-point. The DQ scale must be applied to recover correct values.
+   This is different from a simple FP8↔FP32 cast.
+
+7. Triton Python backend runs the model script in its own process.
+   Plugin .so must be loaded (and init called) in THAT script, not just
+   in the build script.
+
+================================================================================
+5. FILE INVENTORY (current state)
+================================================================================
+
+fused_gemm_silu_quant/
+  kernel_common.h       - GemmConfig struct, launch declarations
+  kernel_sm89.cuh       - SM89 kernel: FP8 GEMM + bias + SiLU → FP16 output
+                          NEEDS UPDATE: apply DQ scales (act_scale, wt_scale)
+  kernel_sm89.cu        - SM89 compilation unit
+  kernel.cuh            - SM90 CUTLASS kernel (FP16 output)
+  kernel_sm90.cu        - SM90 compilation unit
+  kernel_sm90_stub.cpp  - Stub when CUTLASS not available
+  plugin.h              - IPluginV3 + IPluginCreatorV3One declarations
+                          NEEDS UPDATE: 5 inputs instead of 3
+  plugin.cpp            - Plugin implementation + explicit init function
+                          NEEDS UPDATE: 5 inputs, scales in supportsFormatCombination
+  onnx_surgery.py       - ONNX graph surgery (absorbs Q+DQ, FP16 output)
+                          NEEDS UPDATE: extract and pass DQ scales as inputs
+  CMakeLists.txt        - Build system
+  BUILD_AND_TEST.txt    - Build guide + roadmap
+  ENGINEERING_LOG.txt   - This file
