@@ -849,11 +849,27 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         nvtx_range_pop("LoopLabels_split_batched_state_assign")
 
         if partial_hypotheses:
-            with nvtx_range("LoopLabels_partial_hyp_merge_loop"):
-                for i, (hyp, hyp_continuation) in enumerate(zip(partial_hypotheses, hyps)):
-                    if hyp is not None:
-                        hyp.merge_(hyp_continuation)
-                    else:
+            # Branch: when the caller sets self._accumulate_partial_hypothesis=False
+            # (typically a streaming pipeline that ships per-chunk deltas downstream
+            # and never reads the accumulated y_sequence on the python side), we
+            # skip the per-row Hypothesis.merge_ which is dominated by torch.cat on
+            # CPU tensors and is the largest per-chunk python overhead in the
+            # decoder bookkeeping window. The new partial_hypotheses[i] then carries
+            # ONLY this chunk's y_sequence/timestamp/score, with the new dec_state.
+            #
+            # Default behavior (True) is preserved for offline/buffered decoding
+            # callers that do read the accumulated transcript on the python side.
+            accumulate = getattr(self, "_accumulate_partial_hypothesis", True)
+            if accumulate:
+                with nvtx_range("LoopLabels_partial_hyp_merge_loop"):
+                    for i, (hyp, hyp_continuation) in enumerate(zip(partial_hypotheses, hyps)):
+                        if hyp is not None:
+                            hyp.merge_(hyp_continuation)
+                        else:
+                            partial_hypotheses[i] = hyp_continuation
+            else:
+                with nvtx_range("LoopLabels_partial_hyp_replace_loop"):
+                    for i, hyp_continuation in enumerate(hyps):
                         partial_hypotheses[i] = hyp_continuation
             return partial_hypotheses
         return hyps
