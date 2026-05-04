@@ -33,6 +33,7 @@ from nemo.collections.asr.parts.utils.asr_confidence_utils import ConfidenceMeth
 from nemo.core.utils.cuda_python_utils import NeMoCUDAPythonException, cu_call, run_nvrtc, with_conditional_node
 from nemo.core.utils.optional_libs import CUDA_PYTHON_AVAILABLE, cuda_python_required
 from nemo.utils import logging
+from nemo.utils.nvtx import nvtx_decorator, nvtx_range, nvtx_range_pop, nvtx_range_push
 
 if CUDA_PYTHON_AVAILABLE:
     from cuda.bindings import runtime as cudart
@@ -264,6 +265,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         self.full_graph = None
         self.separate_graphs = None
 
+    @nvtx_decorator("RNNTLoopLabels._get_frame_confidence")
     def _get_frame_confidence(self, logits: torch.Tensor) -> Optional[torch.Tensor]:
         float_dtype = logits.dtype
         return (
@@ -272,6 +274,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             else None
         )
 
+    @nvtx_decorator("RNNTLoopLabels.torch_impl")
     def torch_impl(
         self,
         encoder_output: torch.Tensor,
@@ -546,11 +549,13 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             return batched_hyps, alignments, decoding_state
         return batched_hyps, None, decoding_state
 
+    @nvtx_decorator("RNNTLoopLabels._get_decoding_state_item_after_sos")
     def _get_decoding_state_item_after_sos(self, device: torch.device | str) -> LabelLoopingStateItem:
         """Get decoding state item after <SOS> symbol, used for initialization from empty hypotheses."""
         batched_state = self._get_batched_decoding_state_after_sos(device=device, batch_size=1)
         return self.split_batched_state(batched_state)[0]
 
+    @nvtx_decorator("RNNTLoopLabels._get_batched_decoding_state_after_sos")
     def _get_batched_decoding_state_after_sos(
         self, device: torch.device | str, batch_size: int
     ) -> BatchedLabelLoopingState:
@@ -575,6 +580,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         )
         return state
 
+    @nvtx_decorator("RNNTLoopLabels.reset_state_by_mask")
     def reset_state_by_mask(self, state: BatchedLabelLoopingState, mask: torch.Tensor) -> BatchedLabelLoopingState:
         """
         Reset state for masked elements in the batched state.
@@ -615,19 +621,26 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         Args:
             state: batched decoding state
         """
-        state_items: list[LabelLoopingStateItem] = []
-        for i, predictor_state in enumerate(self.decoder.batch_split_states(state.predictor_states)):
-            state_items.append(
-                LabelLoopingStateItem(
-                    predictor_state=predictor_state,
-                    predictor_output=state.predictor_outputs[i],
-                    label=state.labels[i],
-                    decoded_length=state.decoded_lengths[i],
-                    fusion_state_list=([fusion_state[i] for fusion_state in state.fusion_states_list]),
-                    time_jump=None,
-                )
-            )
-        return state_items
+        with nvtx_range("split_batched_state"):
+            with nvtx_range("split_batched_state.batch_split_states"):
+                # decoder.batch_split_states splits the LSTM (h, c) batched tensors
+                # into a list of per-hypothesis state objects (one per batch index).
+                split_predictor_states = list(self.decoder.batch_split_states(state.predictor_states))
+
+            with nvtx_range("split_batched_state.per_hyp_construct"):
+                state_items: list[LabelLoopingStateItem] = []
+                for i, predictor_state in enumerate(split_predictor_states):
+                    state_items.append(
+                        LabelLoopingStateItem(
+                            predictor_state=predictor_state,
+                            predictor_output=state.predictor_outputs[i],
+                            label=state.labels[i],
+                            decoded_length=state.decoded_lengths[i],
+                            fusion_state_list=([fusion_state[i] for fusion_state in state.fusion_states_list]),
+                            time_jump=None,
+                        )
+                    )
+            return state_items
 
     def merge_to_batched_state(self, state_items: list[LabelLoopingStateItem | None]) -> BatchedLabelLoopingState:
         """
@@ -637,28 +650,41 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         Args:
             state_items: list of items to merge
         """
-        if any(item is None for item in state_items):
-            not_none_item = next(item for item in state_items if item is not None)
-            assert not_none_item is not None
-            device = not_none_item.predictor_output.device
-            start_item = self._get_decoding_state_item_after_sos(device=device)
-            for i, item in enumerate(state_items):
-                if item is None:
-                    state_items[i] = start_item
+        with nvtx_range("merge_to_batched_state"):
+            with nvtx_range("merge_to_batched_state.fill_none_with_sos"):
+                if any(item is None for item in state_items):
+                    not_none_item = next(item for item in state_items if item is not None)
+                    assert not_none_item is not None
+                    device = not_none_item.predictor_output.device
+                    start_item = self._get_decoding_state_item_after_sos(device=device)
+                    for i, item in enumerate(state_items):
+                        if item is None:
+                            state_items[i] = start_item
 
-        fusion_states_list = []
-        for fusion_idx in range(len(self._all_fusion_models())):
-            fusion_states_list.append(torch.stack([item.fusion_state_list[fusion_idx] for item in state_items]))
+            with nvtx_range("merge_to_batched_state.fusion_stacks"):
+                fusion_states_list = []
+                for fusion_idx in range(len(self._all_fusion_models())):
+                    fusion_states_list.append(
+                        torch.stack([item.fusion_state_list[fusion_idx] for item in state_items])
+                    )
 
-        batched_state = BatchedLabelLoopingState(
-            predictor_states=self.decoder.batch_unsplit_states([item.predictor_state for item in state_items]),
-            predictor_outputs=torch.stack([item.predictor_output for item in state_items]),
-            labels=torch.stack([item.label for item in state_items]),
-            decoded_lengths=torch.stack([item.decoded_length for item in state_items]),
-            fusion_states_list=fusion_states_list,
-            time_jumps=None,
-        )
-        return batched_state
+            with nvtx_range("merge_to_batched_state.batch_unsplit_states_lstm"):
+                # decoder.batch_unsplit_states stacks per-hyp LSTM (h, c) state tensors
+                # back into a batched tensor; this is a series of torch.stack/concat calls.
+                predictor_states_batched = self.decoder.batch_unsplit_states(
+                    [item.predictor_state for item in state_items]
+                )
+
+            with nvtx_range("merge_to_batched_state.assemble_state"):
+                batched_state = BatchedLabelLoopingState(
+                    predictor_states=predictor_states_batched,
+                    predictor_outputs=torch.stack([item.predictor_output for item in state_items]),
+                    labels=torch.stack([item.label for item in state_items]),
+                    decoded_lengths=torch.stack([item.decoded_length for item in state_items]),
+                    fusion_states_list=fusion_states_list,
+                    time_jumps=None,
+                )
+            return batched_state
 
     def cuda_graphs_impl(
         self,
@@ -679,11 +705,15 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         assert self.cuda_graphs_mode is not None
         device = encoder_output.device
 
-        # do not recalculate joint projection, project only once
+        # Joint encoder projection (one Linear @ encoder_output).
+        nvtx_range_push("CudaGraphImpl_joint_project_encoder")
         encoder_output = self.joint.project_encoder(encoder_output)
         current_batch_size = encoder_output.shape[0]
         current_max_time = encoder_output.shape[1]
+        nvtx_range_pop("CudaGraphImpl_joint_project_encoder")
 
+        # dtype cast (autocast or fallback to joint param dtype).
+        nvtx_range_push("CudaGraphImpl_dtype_cast")
         if torch.is_autocast_enabled():
             encoder_output = encoder_output.to(torch.get_autocast_gpu_dtype())
         else:
@@ -691,12 +721,15 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             # we need to cast encoder output to dtype of params
             float_dtype = next(self.joint.parameters()).dtype
             encoder_output = encoder_output.to(float_dtype)
+        nvtx_range_pop("CudaGraphImpl_dtype_cast")
 
-        # init or reinit graph
+        # init or reinit graph (RARE: only first call or when shape changes)
         if self.state is None or self.state.need_reinit(encoder_output):
-            self._graph_reinitialize(encoder_output)
+            with nvtx_range("CudaGraphImpl_graph_reinitialize"):
+                self._graph_reinitialize(encoder_output)
 
-        # copy (projected) encoder output and lengths
+        # Copy encoder output / length / biasing into the graph's pinned state buffers.
+        nvtx_range_push("CudaGraphImpl_copy_inputs_to_state")
         self.state.encoder_output_projected[:current_batch_size, :current_max_time, ...].copy_(encoder_output)
         self.state.encoder_output_length[: encoder_output_length.shape[0]].copy_(encoder_output_length)
         # set length to zero for elements outside the current batch
@@ -708,41 +741,62 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                 )
             self.state.multi_biasing_ids[:current_batch_size].copy_(multi_biasing_ids)
             self.state.multi_biasing_ids[current_batch_size:].fill_(-1)
+        nvtx_range_pop("CudaGraphImpl_copy_inputs_to_state")
 
+        # Copy prev_batched_state (LSTM hidden + cell, etc.) into graph state.
+        nvtx_range_push("CudaGraphImpl_init_decoding_state")
         self._init_decoding_state(current_batch_size=current_batch_size, prev_batched_state=prev_batched_state)
+        nvtx_range_pop("CudaGraphImpl_init_decoding_state")
 
+        # The ACTUAL graph replay (or manual fallback).
         if self.cuda_graphs_mode is self.CudaGraphsMode.FULL_GRAPH:
+            nvtx_range_push("CudaGraphImpl_full_graph_replay")
             self.full_graph.replay()
+            nvtx_range_pop("CudaGraphImpl_full_graph_replay")
         elif self.cuda_graphs_mode is self.CudaGraphsMode.NO_WHILE_LOOPS:
+            nvtx_range_push("CudaGraphImpl_separate_graphs_replay")
             self.separate_graphs.before_outer_loop.replay()
             while self.state.active_mask_any.item():
                 self.separate_graphs.before_inner_loop.replay()
                 while self.state.advance_mask_any.item():
                     self.separate_graphs.inner_loop_code.replay()
                 self.separate_graphs.after_inner_loop.replay()
+            nvtx_range_pop("CudaGraphImpl_separate_graphs_replay")
         elif self.cuda_graphs_mode is self.CudaGraphsMode.NO_GRAPHS:
             # this mode is only for testing purposes
             # manual loop instead of using graphs
+            nvtx_range_push("CudaGraphImpl_no_graphs_manual_loop")
             self._before_outer_loop()
             while self.state.active_mask_any.item():
                 self._before_inner_loop_get_joint_output()
                 while self.state.advance_mask_any.item():
                     self._inner_loop_step_find_next_non_blank()
                 self._after_inner_loop_step()
+            nvtx_range_pop("CudaGraphImpl_no_graphs_manual_loop")
         else:
             raise NotImplementedError(f"Unknown graph mode: {self.cuda_graphs_mode}")
 
+        # Post-graph timestamp adjustment when running over carried-over state (streaming).
         if prev_batched_state is not None:
-            self._fix_timestamps_for_iterative_decoding(
-                current_batch_size=current_batch_size, prev_batched_state=prev_batched_state
-            )
+            with nvtx_range("CudaGraphImpl_fix_timestamps_iterative"):
+                self._fix_timestamps_for_iterative_decoding(
+                    current_batch_size=current_batch_size, prev_batched_state=prev_batched_state
+                )
+
         # NB: last labels can not exist (nothing decoded on this step).
         # return the last labels from the previous state in this case
+        nvtx_range_push("CudaGraphImpl_get_last_labels")
         last_labels = self.state.batched_hyps.get_last_labels(pad_id=self._SOS)
         pad_batch_size = (
             self.state.batch_size - prev_batched_state.labels.shape[-1] if prev_batched_state is not None else 0
         )
+        nvtx_range_pop("CudaGraphImpl_get_last_labels")
 
+        # Build the BatchedLabelLoopingState to return: clone_state for the LSTM
+        # state, decoder_output.clone(), torch.where on labels, F.pad on lengths,
+        # per-fusion-model clone of fusion_states_list. This is the chunkiest
+        # bit of GPU work outside the actual replay -- watch this range.
+        nvtx_range_push("CudaGraphImpl_build_decoding_state_clones")
         decoding_state = BatchedLabelLoopingState(
             predictor_states=self.decoder.clone_state(self.state.decoder_state),
             predictor_outputs=self.state.decoder_output.clone(),
@@ -764,14 +818,18 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             fusion_states_list=([fusion_state.clone() for fusion_state in self.state.fusion_states_list]),
             time_jumps=None,
         )
+        nvtx_range_pop("CudaGraphImpl_build_decoding_state_clones")
 
         # NB: return an independent copy of hyps/alignments/state
         # to avoid any manipulations with allocated memory outside the decoder
-        return (
+        nvtx_range_push("CudaGraphImpl_clone_hyps_alignments")
+        result = (
             self.state.batched_hyps.clone(),
             self.state.alignments.clone() if self.preserve_alignments else None,
             decoding_state,
         )
+        nvtx_range_pop("CudaGraphImpl_clone_hyps_alignments")
+        return result
 
     @classmethod
     def _create_outer_while_loop_kernel(cls):
@@ -1005,6 +1063,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                     self._inner_loop_step_find_next_non_blank()
                 self._after_inner_loop_step()
 
+    @nvtx_decorator("RNNTLoopLabels._init_decoding_state")
     def _init_decoding_state(
         self, current_batch_size: int, prev_batched_state: Optional[BatchedLabelLoopingState] = None
     ):
@@ -1041,6 +1100,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                     prev_batched_state.fusion_states_list[fusion_model_idx][:current_batch_size]
                 )
 
+    @nvtx_decorator("RNNTLoopLabels._before_outer_loop")
     def _before_outer_loop(self):
         """Clear state and compute initial active mask"""
         self.state.batched_hyps.clear_()
@@ -1062,6 +1122,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         # same as: self.active_mask_any = active_mask.any()
         torch.any(self.state.active_mask, out=self.state.active_mask_any)
 
+    @nvtx_decorator("RNNTLoopLabels._before_inner_loop_get_joint_output")
     def _before_inner_loop_get_joint_output(self):
         """Get Joint output after decoder output, prepare inner loop to search for all next non-blank labels"""
         # stage 1: get joint output, iteratively seeking for non-blank labels
@@ -1128,6 +1189,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         # same as: self.advance_mask_any = advance_mask.any()
         torch.any(self.state.advance_mask, out=self.state.advance_mask_any)
 
+    @nvtx_decorator("RNNTLoopLabels._inner_loop_step_find_next_non_blank")
     def _inner_loop_step_find_next_non_blank(self):
         """Find next non-blank labels - one iteration"""
         # same as: time_indices_current_labels[advance_mask] = time_indices[advance_mask], but non-blocking
@@ -1186,6 +1248,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         torch.logical_and(self.state.active_mask, self.state.blank_mask, out=self.state.advance_mask)
         torch.any(self.state.advance_mask, out=self.state.advance_mask_any)
 
+    @nvtx_decorator("RNNTLoopLabels._after_inner_loop_step")
     def _after_inner_loop_step(self):
         """After inner loop: store labels, query decoder/fusion models, force max symbols"""
         self._after_inner_loop_store_labels()
@@ -1193,6 +1256,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         self._after_inner_loop_get_decoder_output()
         self._after_inner_loop_force_max_symbols()
 
+    @nvtx_decorator("RNNTLoopLabels._after_inner_loop_store_labels")
     def _after_inner_loop_store_labels(self):
         """Stage 3.1: Store hypotheses, update decoder state"""
         self.state.batched_hyps.add_results_masked_no_checks_(
@@ -1202,6 +1266,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             scores=self.state.scores,
         )
 
+    @nvtx_decorator("RNNTLoopLabels._after_inner_loop_select_fusion_states")
     def _after_inner_loop_select_fusion_states(self):
         """Stage 3.2: Select fusion states with new labels"""
         for fusion_model_idx, fusion_states_candidates in enumerate(self.state.fusion_states_candidates_list):
@@ -1213,6 +1278,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                 out=self.state.fusion_states_list[fusion_model_idx],
             )
 
+    @nvtx_decorator("RNNTLoopLabels._after_inner_loop_get_decoder_output")
     def _after_inner_loop_get_decoder_output(self):
         """Stage 3.3: Get decoder (prediction network) output using new labels"""
         decoder_output, new_state, *_ = self.decoder.predict(
@@ -1229,6 +1295,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             out=self.state.decoder_output,
         )
 
+    @nvtx_decorator("RNNTLoopLabels._after_inner_loop_force_max_symbols")
     def _after_inner_loop_force_max_symbols(self):
         """Stage 4: to avoid looping, go to next frame after max_symbols emission"""
         # if labels are non-blank (not end-of-utterance), check that last observed timestep with label:
@@ -1250,6 +1317,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         torch.less(self.state.time_indices, self.state.encoder_output_length, out=self.state.active_mask)
         torch.any(self.state.active_mask, out=self.state.active_mask_any)
 
+    @nvtx_decorator("RNNTLoopLabels._fix_timestamps_for_iterative_decoding")
     def _fix_timestamps_for_iterative_decoding(
         self, current_batch_size: int, prev_batched_state: BatchedLabelLoopingState
     ):

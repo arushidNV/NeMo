@@ -23,6 +23,7 @@ from nemo.collections.asr.parts.submodules.ngram_lm import NGramGPULanguageModel
 from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.collections.common.parts.optional_cuda_graphs import WithOptionalCudaGraphs
 from nemo.core.utils.cuda_python_utils import check_cuda_python_cuda_graphs_conditional_nodes_supported
+from nemo.utils.nvtx import nvtx_range
 from nemo.utils import logging
 from nemo.utils.enum import PrettyStrEnum
 
@@ -290,20 +291,23 @@ class GreedyBatchedLabelLoopingComputerBase(WithOptionalCudaGraphs, ABC):
             prev_batched_state: previous batched decoding state
             multi_biasing_ids: optional tensor [Batch] with ids of fused biasing models
         """
-        if self.cuda_graphs_mode is not None and x.device.type == "cuda":
-            # disable CUDA graphs if Mixed Precision is used due to incorrect behavior
-            with torch.amp.autocast(device_type="cuda", enabled=False):
-                # TODO(vbataev): fix issue with mixed precision, remove this restriction
-                return self.cuda_graphs_impl(
+        with nvtx_range("DecComputer_call"):
+            if self.cuda_graphs_mode is not None and x.device.type == "cuda":
+                # disable CUDA graphs if Mixed Precision is used due to incorrect behavior
+                with nvtx_range("DecComputer_cuda_graphs_impl_dispatch"):
+                    with torch.amp.autocast(device_type="cuda", enabled=False):
+                        # TODO(vbataev): fix issue with mixed precision, remove this restriction
+                        return self.cuda_graphs_impl(
+                            encoder_output=x,
+                            encoder_output_length=out_len,
+                            prev_batched_state=prev_batched_state,
+                            multi_biasing_ids=multi_biasing_ids,
+                        )
+
+            with nvtx_range("DecComputer_torch_impl_dispatch"):
+                return self.torch_impl(
                     encoder_output=x,
                     encoder_output_length=out_len,
                     prev_batched_state=prev_batched_state,
                     multi_biasing_ids=multi_biasing_ids,
                 )
-
-        return self.torch_impl(
-            encoder_output=x,
-            encoder_output_length=out_len,
-            prev_batched_state=prev_batched_state,
-            multi_biasing_ids=multi_biasing_ids,
-        )

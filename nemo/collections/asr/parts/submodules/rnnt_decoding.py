@@ -33,7 +33,7 @@ from nemo.collections.common.tokenizers.aggregate_tokenizer import AggregateToke
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.utils import logging
 from nemo.utils.enum import PrettyStrEnum
-from nemo.utils.nvtx import nvtx_range
+from nemo.utils.nvtx import nvtx_decorator, nvtx_range
 
 try:
     import kenlm
@@ -690,6 +690,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         """
         raise NotImplementedError()
 
+    @nvtx_decorator("AbstractRNNTDecoding.rnnt_decoder_predictions_tensor")
     def rnnt_decoder_predictions_tensor(
         self,
         encoder_output: torch.Tensor,
@@ -787,6 +788,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
 
             return [Hypothesis(h.score, h.y_sequence, h.text) for h in hypotheses]
 
+    @nvtx_decorator("AbstractRNNTDecoding.decode_hypothesis")
     def decode_hypothesis(self, hypotheses_list: List[Hypothesis]) -> List[Union[Hypothesis, NBestHypotheses]]:
         """
         Decode a list of hypotheses into a list of strings.
@@ -828,6 +830,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         nvtx_range_pop(nvtx_range_token)
         return hypotheses_list
 
+    @nvtx_decorator("AbstractRNNTDecoding.compute_confidence")
     def compute_confidence(self, hypotheses_list: List[Hypothesis]) -> List[Hypothesis]:
         """
         Computes high-level (per-token and/or per-word) confidence scores for a list of hypotheses.
@@ -909,6 +912,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         return hypotheses_list
 
     @abstractmethod
+    @nvtx_decorator("RNNTDecoding.decode_tokens_to_str")
     def decode_tokens_to_str(self, tokens: List[int]) -> str:
         """
         Implemented by subclass in order to decoder a token id list into a string.
@@ -922,6 +926,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         raise NotImplementedError()
 
     @abstractmethod
+    @nvtx_decorator("RNNTDecoding.decode_ids_to_tokens")
     def decode_ids_to_tokens(self, tokens: List[int]) -> List[str]:
         """
         Implemented by subclass in order to decode a token id list into a token list.
@@ -963,6 +968,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         """
         raise NotImplementedError()
 
+    @nvtx_decorator("RNNTDecoding.decode_ids_to_str")
     def decode_ids_to_str(self, tokens: List[int]) -> str:
         """
         Decodes a list of tokens ids to a string.
@@ -972,6 +978,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         else:
             return self.decode_tokens_to_str(self.decode_ids_to_tokens(tokens))
 
+    @nvtx_decorator("RNNTDecoding.decode_tokens_to_str_with_strip_punctuation")
     def decode_tokens_to_str_with_strip_punctuation(self, tokens: List[int]) -> str:
         """
         Decodes a list of tokens to a string and removes a space before supported punctuation marks.
@@ -1016,6 +1023,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             logging.info("Joint fused batch size <= 0; Will temporarily disable fused batch step in the Joint.")
             self.decoding.joint.set_fuse_loss_wer(False)
 
+    @nvtx_decorator("RNNTDecoding.compute_rnnt_timestamps")
     def compute_rnnt_timestamps(self, hypothesis: Hypothesis, timestamp_type: str = "all"):
         """
         Computes character, word, and segment timestamps for an RNN-T hypothesis.
@@ -1443,6 +1451,7 @@ class RNNTDecoding(AbstractRNNTDecoding):
         """
         return self._aggregate_token_confidence_chars(hypothesis.words, hypothesis.token_confidence)
 
+    @nvtx_decorator("RNNTBPEDecoding.decode_tokens_to_str")
     def decode_tokens_to_str(self, tokens: List[str]) -> str:
         """
         Implemented by subclass in order to decoder a token list into a string.
@@ -1456,6 +1465,7 @@ class RNNTDecoding(AbstractRNNTDecoding):
         hypothesis = ''.join(tokens)
         return hypothesis
 
+    @nvtx_decorator("RNNTDecoding.decode_ids_to_tokens")
     def decode_ids_to_tokens(self, tokens: List[int]) -> List[str]:
         """
         Implemented by subclass in order to decode a token id list into a token list.
@@ -1732,6 +1742,7 @@ class RNNTBPEDecoding(AbstractRNNTDecoding):
             hypothesis.words, hypothesis.token_confidence, hypothesis.y_sequence
         )
 
+    @nvtx_decorator("RNNTBPEDecoding.decode_tokens_to_str")
     def decode_tokens_to_str(self, tokens: List[str]) -> str:
         """
         Implemented by subclass in order to decoder a token list into a string.
@@ -1745,6 +1756,7 @@ class RNNTBPEDecoding(AbstractRNNTDecoding):
         hypothesis = self.tokenizer.tokens_to_text(tokens)
         return hypothesis
 
+    @nvtx_decorator("RNNTDecoding.decode_ids_to_tokens")
     def decode_ids_to_tokens(self, tokens: List[int]) -> List[str]:
         """
         Implemented by subclass in order to decode a token id list into a token list.
@@ -1785,6 +1797,7 @@ class RNNTBPEDecoding(AbstractRNNTDecoding):
         lang_list = self.tokenizer.ids_to_text_and_langs(tokens)
         return lang_list
 
+    @nvtx_decorator("AbstractRNNTDecoding.decode_hypothesis")
     def decode_hypothesis(self, hypotheses_list: List[Hypothesis]) -> List[Union[Hypothesis, NBestHypotheses]]:
         """
         Decode a list of hypotheses into a list of strings.

@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from nemo.collections.asr.parts.context_biasing.biasing_multi_model import BiasingRequestItemConfig
-from nemo.utils.nvtx import nvtx_range
+from nemo.utils.nvtx import nvtx_decorator, nvtx_range
 
 
 @dataclass
@@ -151,6 +151,7 @@ class Hypothesis:
         """
         return [] if self.text is None else self.text.split()
 
+    @nvtx_decorator("Hypothesis.merge_")
     def merge_(self, other: "Hypothesis") -> "Hypothesis":
         """Merge (inplace) current hypothesis with another one."""
         self.score += other.score
@@ -360,6 +361,7 @@ class BatchedHyps:
             self.token_durations = torch.cat((self.token_durations, torch.zeros_like(self.token_durations)), dim=-1)
         self._max_length *= 2
 
+    @nvtx_decorator("BatchedHyps.add_results_")
     def add_results_(
         self,
         active_indices: torch.Tensor,
@@ -391,6 +393,7 @@ class BatchedHyps:
             token_durations=token_durations if self.is_with_durations else None,
         )
 
+    @nvtx_decorator("BatchedHyps.add_results_no_checks_")
     def add_results_no_checks_(
         self,
         active_indices: torch.Tensor,
@@ -428,6 +431,7 @@ class BatchedHyps:
         # increase lengths
         self.current_lengths[active_indices] += 1
 
+    @nvtx_decorator("BatchedHyps.add_results_masked_")
     def add_results_masked_(
         self,
         active_mask: torch.Tensor,
@@ -456,6 +460,7 @@ class BatchedHyps:
             token_durations=token_durations if self.is_with_durations else None,
         )
 
+    @nvtx_decorator("BatchedHyps.add_results_masked_no_checks_")
     def add_results_masked_no_checks_(
         self,
         active_mask: torch.Tensor,
@@ -504,12 +509,14 @@ class BatchedHyps:
         # increase lengths
         self.current_lengths += active_mask
 
+    @nvtx_decorator("BatchedHyps.get_last_labels")
     def get_last_labels(self, pad_id: int = -1):
         """Get last labels. For elements without labels use pad_id"""
         return torch.where(
             self.current_lengths > 0, self.transcript[self._batch_indices, self.current_lengths - 1], pad_id
         )
 
+    @nvtx_decorator("BatchedHyps.clone")
     def clone(self) -> "BatchedHyps":
         """Return a copy of self"""
         batched_hyps = BatchedHyps(
@@ -529,6 +536,7 @@ class BatchedHyps:
         batched_hyps.last_timestamp_lasts.copy_(self.last_timestamp_lasts)
         return batched_hyps
 
+    @nvtx_decorator("BatchedHyps.merge_")
     def merge_(self, other: "BatchedHyps") -> "BatchedHyps":
         """
         Merge two batched hypotheses structures.
@@ -658,6 +666,7 @@ class BatchedAlignments:
             self.frame_confidence = torch.cat((self.frame_confidence, torch.zeros_like(self.frame_confidence)), dim=1)
         self._max_length *= 2
 
+    @nvtx_decorator("BatchedAlignments.add_results_")
     def add_results_(
         self,
         active_indices: torch.Tensor,
@@ -697,6 +706,7 @@ class BatchedAlignments:
         # increase lengths
         self.current_lengths[active_indices] += 1
 
+    @nvtx_decorator("BatchedAlignments.add_results_masked_")
     def add_results_masked_(
         self,
         active_mask: torch.Tensor,
@@ -721,6 +731,7 @@ class BatchedAlignments:
             active_mask=active_mask, time_indices=time_indices, logits=logits, labels=labels, confidence=confidence
         )
 
+    @nvtx_decorator("BatchedAlignments.add_results_masked_no_checks_")
     def add_results_masked_no_checks_(
         self,
         active_mask: torch.Tensor,
@@ -754,6 +765,7 @@ class BatchedAlignments:
         # increase lengths
         self.current_lengths += active_mask
 
+    @nvtx_decorator("BatchedAlignments.clone")
     def clone(self) -> "BatchedAlignments":
         """Return a copy of self"""
         batched_alignments = BatchedAlignments(
@@ -793,25 +805,23 @@ def batched_hyps_to_hypotheses(
     with nvtx_range("batched_hyps_to_hypotheses"):
         assert batch_size is None or batch_size <= batched_hyps.scores.shape[0]
         num_hyps = batched_hyps.scores.shape[0] if batch_size is None else batch_size
-        # NB: clone is not necessary anymore, since CUDA graph decoder always returns an independent copy
-        with nvtx_range("batched_hyps_to_hypotheses_d2h"):
+        with nvtx_range("batched_hyps_to_hypotheses._d2h"):
             scores = batched_hyps.scores.cpu()
             current_lengths = batched_hyps.current_lengths.cpu()
             transcript = batched_hyps.transcript.cpu()
             timestamps = batched_hyps.timestamps.cpu()
-        with nvtx_range("batched_hyps_to_hypotheses_construct"):
-            # Use the CPU current_lengths everywhere -- the original code used
-            # batched_hyps.current_lengths[i] (still on GPU) on lines that picked
-            # the timestamp / token_duration slice, which forced an extra D2H sync
-            # per row. Reading from the cpu copy removes those syncs.
+            token_durations_cpu = (
+                batched_hyps.token_durations.cpu() if batched_hyps.is_with_durations else None
+            )
+        with nvtx_range("batched_hyps_to_hypotheses._construct"):
             hypotheses = [
                 Hypothesis(
                     score=scores[i].item(),
                     y_sequence=transcript[i, : current_lengths[i]],
                     timestamp=timestamps[i, : current_lengths[i]],
                     token_duration=(
-                        batched_hyps.token_durations[i, : current_lengths[i]]
-                        if batched_hyps.is_with_durations
+                        token_durations_cpu[i, : current_lengths[i]]
+                        if token_durations_cpu is not None
                         else torch.empty(0)
                     ),
                     alignments=None,
@@ -820,8 +830,7 @@ def batched_hyps_to_hypotheses(
                 for i in range(num_hyps)
             ]
         if alignments is not None:
-            with nvtx_range("batched_hyps_to_hypotheses_alignments"):
-                # move all data to cpu to avoid overhead with moving data by chunks
+            with nvtx_range("batched_hyps_to_hypotheses._alignments"):
                 alignment_lengths = alignments.current_lengths.cpu().tolist()
                 if alignments.with_alignments:
                     alignment_logits = alignments.logits.cpu()
@@ -829,7 +838,6 @@ def batched_hyps_to_hypotheses(
                 if alignments.with_frame_confidence:
                     frame_confidence = alignments.frame_confidence.cpu()
 
-                # for each hypothesis - aggregate alignment using unique_consecutive for time indices (~itertools.groupby)
                 for i in range(len(hypotheses)):
                     hypotheses[i].alignments = []
                     if alignments.with_frame_confidence:

@@ -47,9 +47,10 @@ from nemo.collections.common.parts.rnn import label_collate
 from nemo.core.classes import Typing, typecheck
 from nemo.core.neural_types import AcousticEncodedRepresentation, HypothesisType, LengthsType, NeuralType
 from nemo.utils import logging
-from nemo.utils.nvtx import nvtx_decorator
+from nemo.utils.nvtx import nvtx_decorator, nvtx_range
 
 
+@nvtx_decorator("rnnt_greedy_decoding.pack_hypotheses")
 def pack_hypotheses(
     hypotheses: List[rnnt_utils.Hypothesis],
     logitlen: torch.Tensor,
@@ -202,6 +203,7 @@ class _GreedyRNNTInfer(Typing, ConfidenceMethodMixin):
         return self.forward(*args, **kwargs)
 
     @torch.no_grad()
+    @nvtx_decorator("_GreedyRNNTInfer._pred_step")
     def _pred_step(
         self,
         label: Union[torch.Tensor, int],
@@ -240,6 +242,7 @@ class _GreedyRNNTInfer(Typing, ConfidenceMethodMixin):
         # output: [B, 1, K]
         return self.decoder.predict(label, hidden, add_sos=add_sos, batch_size=batch_size)
 
+    @nvtx_decorator("_GreedyRNNTInfer._joint_step")
     def _joint_step(self, enc, pred, log_normalize: Optional[bool] = None):
         """
         Common joint step based on AbstractRNNTJoint implementation.
@@ -264,6 +267,7 @@ class _GreedyRNNTInfer(Typing, ConfidenceMethodMixin):
 
         return logits
 
+    @nvtx_decorator("_GreedyRNNTInfer._joint_step_after_projection")
     def _joint_step_after_projection(self, enc, pred, log_normalize: Optional[bool] = None) -> torch.Tensor:
         """
         Common joint step based on AbstractRNNTJoint implementation.
@@ -792,14 +796,20 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         The main idea: search for next labels for the whole batch (evaluating Joint)
         and thus always evaluate prediction network with maximum possible batch size
         """
-        # setup batched state
+        from nemo.utils.nvtx import nvtx_range, nvtx_range_pop, nvtx_range_push
+
+        # setup batched state (CPU-side LSTM state stacking from prev chunk's hyps)
+        nvtx_range_push("LoopLabels_merge_to_batched_state")
         if partial_hypotheses is None or all((hyp is None or hyp.dec_state is None) for hyp in partial_hypotheses):
             batched_state = None
         else:
             batched_state = self.decoding_computer.merge_to_batched_state(
                 [hyp.dec_state if hyp is not None else None for hyp in partial_hypotheses]
             )
-        # setup fused biasing ids
+        nvtx_range_pop("LoopLabels_merge_to_batched_state")
+
+        # setup fused biasing ids (np.full + Python loop + .to(device))
+        nvtx_range_push("LoopLabels_setup_multi_biasing_ids")
         if self.decoding_computer.per_stream_biasing_enabled:
             batch_size = out_len.shape[0]
             multi_biasing_ids = np.full([batch_size], fill_value=-1)
@@ -815,22 +825,36 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
             multi_biasing_ids = torch.from_numpy(multi_biasing_ids).to(device=x.device)
         else:
             multi_biasing_ids = None
+        nvtx_range_pop("LoopLabels_setup_multi_biasing_ids")
+
+        # The actual cuda-graph replay (or torch impl) lives in __call__ -> cuda_graphs_impl.
+        # That function has its own NVTX subdivision so you can see graph-replay vs setup.
+        nvtx_range_push("LoopLabels_decoding_computer_call")
         batched_hyps, alignments, batched_state = self.decoding_computer(
             x=x,
             out_len=out_len,
             prev_batched_state=batched_state,
             multi_biasing_ids=multi_biasing_ids,
         )
+        nvtx_range_pop("LoopLabels_decoding_computer_call")
+
+        # batched_hyps_to_hypotheses already has its own NVTX (in rnnt_utils.py):
+        # batched_hyps_to_hypotheses, _d2h, _construct, _alignments.
         hyps = rnnt_utils.batched_hyps_to_hypotheses(batched_hyps, alignments, batch_size=x.shape[0])
+
+        # Per-hyp loop assigning dec_state from split_batched_state (CPU work).
+        nvtx_range_push("LoopLabels_split_batched_state_assign")
         for hyp, state_item in zip(hyps, self.decoding_computer.split_batched_state(batched_state)):
             hyp.dec_state = state_item
+        nvtx_range_pop("LoopLabels_split_batched_state_assign")
 
         if partial_hypotheses:
-            for i, (hyp, hyp_continuation) in enumerate(zip(partial_hypotheses, hyps)):
-                if hyp is not None:
-                    hyp.merge_(hyp_continuation)
-                else:
-                    partial_hypotheses[i] = hyp_continuation
+            with nvtx_range("LoopLabels_partial_hyp_merge_loop"):
+                for i, (hyp, hyp_continuation) in enumerate(zip(partial_hypotheses, hyps)):
+                    if hyp is not None:
+                        hyp.merge_(hyp_continuation)
+                    else:
+                        partial_hypotheses[i] = hyp_continuation
             return partial_hypotheses
         return hyps
 

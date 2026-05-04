@@ -865,6 +865,7 @@ class RNNTDecoder(rnnt_abstract.AbstractRNNTDecoder, Exportable, AdapterModuleMi
         )
         return layers
 
+    @nvtx_decorator("RNNTDecoder.initialize_state")
     def initialize_state(self, y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Initialize the state of the LSTM layers, with same dtype and device as input `y`.
@@ -1181,11 +1182,13 @@ class RNNTDecoder(rnnt_abstract.AbstractRNNTDecoder, Exportable, AdapterModuleMi
             dst_states[1][:, :batch_size].copy_(src_states[1][:, :batch_size])
 
     @classmethod
+    @nvtx_decorator("RNNTDecoder.clone_state")
     def clone_state(cls, state: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Return copy of the states"""
         return state[0].clone(), state[1].clone()
 
     @classmethod
+    @nvtx_decorator("RNNTDecoder.batch_split_states")
     def batch_split_states(
         cls, batch_states: tuple[torch.Tensor, torch.Tensor]
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -1199,6 +1202,7 @@ class RNNTDecoder(rnnt_abstract.AbstractRNNTDecoder, Exportable, AdapterModuleMi
         ]
 
     @classmethod
+    @nvtx_decorator("RNNTDecoder.batch_unsplit_states")
     def batch_unsplit_states(
         cls, batch_states: list[tuple[torch.Tensor, torch.Tensor]], device=None, dtype=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1653,6 +1657,7 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
             )
         return self.hypotheses
 
+    @nvtx_decorator("RNNTJoint.project_encoder")
     def project_encoder(self, encoder_output: torch.Tensor) -> torch.Tensor:
         """
         Project the encoder output to the joint hidden dimension.
@@ -1665,6 +1670,7 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
         """
         return self.enc(encoder_output)
 
+    @nvtx_decorator("RNNTJoint.project_prednet")
     def project_prednet(self, prednet_output: torch.Tensor) -> torch.Tensor:
         """
         Project the Prediction Network (Decoder) output to the joint hidden dimension.
