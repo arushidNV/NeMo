@@ -121,6 +121,21 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
             cache_last_channel_len=cache_last_channel_len,
         )
 
+        if prompt_vectors is not None and getattr(self.asr_model, 'concat', False):
+            # Mirror model.forward()'s post-encoder prompt fusion for cache-aware streaming.
+            # cache_aware_stream_step bypasses model.forward(), so concat + prompt_kernel must be applied here.
+            encoded = encoded.transpose(1, 2)  # [B, D, T] -> [B, T, D]
+            time_steps = encoded.shape[1]
+            if prompt_vectors.dim() == 2:
+                prompt_vectors = prompt_vectors.unsqueeze(1).expand(-1, time_steps, -1)
+            elif prompt_vectors.shape[1] > time_steps:
+                prompt_vectors = prompt_vectors[:, :time_steps, :]
+            out_dtype = encoded.dtype
+            encoded = self.asr_model.prompt_kernel(
+                torch.cat([encoded, prompt_vectors.to(encoded.dtype)], dim=-1)
+            ).to(out_dtype)
+            encoded = encoded.transpose(1, 2)  # [B, T, D] -> [B, D, T]
+
         if drop_left_context:
             # drop left context
             encoded = encoded[:, :, drop_left_context:]
