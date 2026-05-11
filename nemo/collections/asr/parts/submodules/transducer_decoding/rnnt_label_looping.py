@@ -370,6 +370,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                 .squeeze(1)
                 .squeeze(1)
             )
+            self._apply_logit_bias(logits)
             scores, labels = logits.max(-1)
 
             if self.has_fusion_models():
@@ -421,6 +422,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
                     .squeeze(1)
                     .squeeze(1)
                 )
+                self._apply_logit_bias(logits)
                 # get labels (greedy) and scores from current logits, replace labels/scores with new
                 # labels[advance_mask] are blank, and we are looking for non-blank labels
                 more_scores, more_labels = logits.max(dim=-1)
@@ -1063,6 +1065,22 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
         # same as: self.active_mask_any = active_mask.any()
         torch.any(self.state.active_mask, out=self.state.active_mask_any)
 
+    def _apply_logit_bias(self, logits):
+        """Add the optional inference-time logit_bias to greedy logits in-place.
+
+        Supports either a 1D shared bias `[V]` (added to every batch row) or a
+        2D per-sample bias `[B, V]` (sliced to `logits.shape[0]` to handle the
+        last partial batch in eager mode; CUDA-graph mode always sees the full
+        cached batch).
+        """
+        bias = getattr(self, 'logit_bias', None)
+        if bias is None:
+            return
+        if bias.dim() == 1:
+            logits.add_(bias)
+        else:
+            logits.add_(bias[: logits.shape[0]])
+
     def _before_inner_loop_get_joint_output(self):
         """Get Joint output after decoder output, prepare inner loop to search for all next non-blank labels"""
         # stage 1: get joint output, iteratively seeking for non-blank labels
@@ -1077,6 +1095,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             .squeeze(1)
             .squeeze(1)
         )
+        self._apply_logit_bias(logits)
         # same as: scores, labels = logits.max(-1)
         torch.max(logits, dim=-1, out=(self.state.scores, self.state.labels))
 
@@ -1149,6 +1168,7 @@ class GreedyBatchedRNNTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBas
             .squeeze(1)
             .squeeze(1)
         )
+        self._apply_logit_bias(logits)
         # get labels (greedy) and scores from current logits, replace labels/scores with new
         # labels[advance_mask] are blank, and we are looking for non-blank labels
         more_scores, more_labels = logits.max(-1)
