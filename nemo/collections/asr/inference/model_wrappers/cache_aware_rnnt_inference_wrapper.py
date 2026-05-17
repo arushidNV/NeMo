@@ -149,16 +149,29 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
         # return_text=False skips decode_hypothesis (BPE detokenize), which is wasted work
         # in the Riva niva pipeline -- niva ships raw y_sequence / timestamp / score over
         # DLPack and the C++ rnnt_postprocessor.cc does detokenization on the deltas only.
-        # Calling decode_hypothesis here would also re-detokenize the *full* accumulated
-        # transcript every chunk because partial_hypotheses merges the new tokens into the
-        # carried-over y_sequence.
-        best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
-            encoded,
-            encoded_len,
-            return_hypotheses=True,
-            partial_hypotheses=previous_hypotheses,
-            return_text=False,
-        )
+        #
+        # _accumulate_partial_hypothesis=False on the underlying greedy decoder skips the
+        # per-row Hypothesis.merge_ (torch.cat-on-CPU storm) inside
+        # _greedy_decode_blank_as_pad_loop_labels. Niva does its own delta extraction in
+        # get_intermediate_outputs_cache_aware, so the accumulated y_sequence/timestamp on
+        # partial_hypotheses are never read python-side. Returned hyp.y_sequence is then
+        # only this chunk's tokens; downstream niva must treat it as the delta.
+        greedy = getattr(self.asr_model.decoding, "decoding", None)
+        prev_accumulate = None
+        if greedy is not None:
+            prev_accumulate = getattr(greedy, "_accumulate_partial_hypothesis", True)
+            greedy._accumulate_partial_hypothesis = False
+        try:
+            best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
+                encoded,
+                encoded_len,
+                return_hypotheses=True,
+                partial_hypotheses=previous_hypotheses,
+                return_text=False,
+            )
+        finally:
+            if greedy is not None:
+                greedy._accumulate_partial_hypothesis = prev_accumulate
         return best_hyp, new_context
 
     def stream_step(
