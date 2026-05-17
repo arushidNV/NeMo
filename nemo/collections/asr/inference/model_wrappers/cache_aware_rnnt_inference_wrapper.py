@@ -146,8 +146,18 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
             encoded = encoded[:, :, :valid_out_len]
             encoded_len = torch.ones_like(encoded_len) * valid_out_len
 
+        # return_text=False skips decode_hypothesis (BPE detokenize), which is wasted work
+        # in the Riva niva pipeline -- niva ships raw y_sequence / timestamp / score over
+        # DLPack and the C++ rnnt_postprocessor.cc does detokenization on the deltas only.
+        # Calling decode_hypothesis here would also re-detokenize the *full* accumulated
+        # transcript every chunk because partial_hypotheses merges the new tokens into the
+        # carried-over y_sequence.
         best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
-            encoded, encoded_len, return_hypotheses=True, partial_hypotheses=previous_hypotheses
+            encoded,
+            encoded_len,
+            return_hypotheses=True,
+            partial_hypotheses=previous_hypotheses,
+            return_text=False,
         )
         return best_hyp, new_context
 
