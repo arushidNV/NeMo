@@ -792,18 +792,27 @@ def batched_hyps_to_hypotheses(
     assert batch_size is None or batch_size <= batched_hyps.scores.shape[0]
     num_hyps = batched_hyps.scores.shape[0] if batch_size is None else batch_size
     # NB: clone is not necessary anymore, since CUDA graph decoder always returns an independent copy
+    # Move everything to CPU up front. The earlier code sliced `batched_hyps.timestamps[i, :batched_hyps.current_lengths[i]]`
+    # and `batched_hyps.token_durations[i, :batched_hyps.current_lengths[i]]` inside the Python loop, which
+    # (a) read from GPU tensors and (b) used the GPU `current_lengths[i]` scalar as the slice end. Each iteration
+    # triggered a synchronous D2H copy of one scalar, serialising the loop in CUDA-graph mode. By pre-copying all
+    # four tensors and using the CPU-side `current_lengths[i]` scalar, the loop body is pure-CPU and the per-row
+    # sync vanishes.
     scores = batched_hyps.scores.cpu()
     current_lengths = batched_hyps.current_lengths.cpu()
     transcript = batched_hyps.transcript.cpu()
     timestamps = batched_hyps.timestamps.cpu()
+    token_durations = (
+        batched_hyps.token_durations.cpu() if batched_hyps.is_with_durations else None
+    )
     hypotheses = [
         Hypothesis(
             score=scores[i].item(),
             y_sequence=transcript[i, : current_lengths[i]],
-            timestamp=timestamps[i, : batched_hyps.current_lengths[i]],
+            timestamp=timestamps[i, : current_lengths[i]],
             token_duration=(
-                batched_hyps.token_durations[i, : batched_hyps.current_lengths[i]]
-                if batched_hyps.is_with_durations
+                token_durations[i, : current_lengths[i]]
+                if token_durations is not None
                 else torch.empty(0)
             ),
             alignments=None,
