@@ -719,6 +719,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         encoded_lengths: torch.Tensor,
         return_hypotheses: bool = False,
         partial_hypotheses: Optional[List[Hypothesis]] = None,
+        return_text: bool = True,
     ) -> Union[List[Hypothesis], List[List[Hypothesis]]]:
         """
         Decode an encoder output by autoregressive decoding of the Decoder+Joint networks.
@@ -727,6 +728,13 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             encoder_output: torch.Tensor of shape [B, D, T].
             encoded_lengths: torch.Tensor containing lengths of the padded encoder outputs. Shape [B].
             return_hypotheses: bool. If set to True it will return list of Hypothesis or NBestHypotheses
+            return_text: bool. Default True. If False, the BPE detokenization (decode_hypothesis),
+                timestamp computation, confidence computation, and NBest text construction are
+                skipped. The caller takes responsibility for any text reconstruction. Useful for
+                streaming pipelines that ship raw token IDs to a downstream detokenizer (e.g.
+                Riva's C++ rnnt_postprocessor) and would otherwise pay 2x the work, plus the
+                cost of re-detokenizing the entire accumulated transcript every chunk when
+                `partial_hypotheses` is in use.
 
         Returns:
             If `return_all_hypothesis` is set:
@@ -748,6 +756,14 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
 
         prediction_list = hypotheses_list
+
+        if not return_text:
+            # Skip BPE detokenize / timestamp post-processing / confidence; caller handles
+            # any text reconstruction. Hypothesis objects retain y_sequence, timestamp,
+            # score, dec_state. hyp.text remains "" (its default).
+            if return_hypotheses:
+                return prediction_list
+            return [Hypothesis(h.score, h.y_sequence, "") for h in prediction_list]
 
         if isinstance(prediction_list[0], NBestHypotheses):
             hypotheses = []
