@@ -14,16 +14,81 @@
 
 
 import copy
+import tarfile
 from functools import cached_property
-from typing import Callable
+from typing import Callable, Optional, Type
 
 import torch
+import yaml
 from omegaconf import DictConfig, open_dict
 
 from nemo.collections.asr.inference.utils.constants import SENTENCEPIECE_UNDERSCORE
 from nemo.collections.asr.inference.utils.device_utils import setup_device
 from nemo.collections.asr.inference.utils.pipeline_utils import make_preprocessor_deterministic
 from nemo.collections.asr.models import ASRModel, EncDecHybridRNNTCTCModel
+from nemo.utils import logging, model_utils
+
+# Map .nemo `target:` values whose concrete class is missing from this NeMo
+# install onto a known-compatible class. The substitute must be a superset
+# w.r.t. state_dict tensor names and forward semantics for the inference
+# path we care about. Added because Riva ships checkpoints trained on
+# internal feature branches whose target classes do not exist upstream.
+_NEMO_TARGET_FALLBACKS = {
+    # Pure RNN-T-with-prompt model (internal Riva training branch) ->
+    # hybrid RNN-T+CTC-with-prompt class. The hybrid class loads RNN-T-only
+    # state_dicts cleanly; the unused CTC head is randomly initialised but
+    # never executed at inference time in the cache-aware streaming path.
+    "nemo.collections.asr.models.rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt":
+        "nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt.EncDecHybridRNNTCTCBPEModelWithPrompt",
+}
+
+
+def _resolve_concrete_class_from_nemo(nemo_path: str) -> Optional[Type[ASRModel]]:
+    """Peek at the embedded model_config.yaml inside a .nemo tarball, look up
+    its top-level `target:` (or `_target_:`) field, and return the matching
+    concrete subclass of ASRModel.
+
+    If the target points to a class that doesn't exist in this NeMo install,
+    apply _NEMO_TARGET_FALLBACKS to map it to a compatible substitute. Returns
+    None when no usable target can be resolved.
+
+    This is necessary because ASRModel.restore_from() falls back to
+    instantiating ASRModel itself (which is abstract) when it can't parse the
+    target, producing a confusing "Can't instantiate abstract class ASRModel"
+    error instead of just loading the right concrete class.
+    """
+    try:
+        with tarfile.open(nemo_path, "r") as tf:
+            cfg_text = None
+            for member in tf.getmembers():
+                name = member.name.rsplit("/", 1)[-1]
+                if name in ("model_config.yaml", "config.yaml"):
+                    f = tf.extractfile(member)
+                    if f is None:
+                        continue
+                    cfg_text = f.read().decode("utf-8", errors="ignore")
+                    break
+        if not cfg_text:
+            return None
+        cfg = yaml.safe_load(cfg_text)
+        if not isinstance(cfg, dict):
+            return None
+        target = cfg.get("target") or cfg.get("_target_")
+        if not target or not isinstance(target, str):
+            return None
+        resolved = _NEMO_TARGET_FALLBACKS.get(target, target)
+        if resolved != target:
+            logging.info(
+                f"asr_inference_wrapper.load_model: remapping missing target "
+                f"`{target}` -> `{resolved}` via _NEMO_TARGET_FALLBACKS."
+            )
+        return model_utils.import_class_by_path(resolved)
+    except Exception as e:
+        logging.warning(
+            f"asr_inference_wrapper.load_model: failed to resolve concrete class "
+            f"from {nemo_path}: {e}; falling back to ASRModel.restore_from()."
+        )
+        return None
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecodingConfig
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
 from nemo.collections.asr.parts.utils.asr_confidence_utils import get_confidence_aggregation_bank
@@ -86,7 +151,14 @@ class ASRInferenceWrapper:
         """
         try:
             if model_name.endswith('.nemo'):
-                asr_model = ASRModel.restore_from(model_name, map_location=map_location)
+                # ASRModel.restore_from() falls back to instantiating ASRModel itself
+                # (which is abstract) when it can't parse the .nemo's `target:`. That
+                # surfaces as a confusing "Can't instantiate abstract class ASRModel"
+                # error. To avoid that, peek at the embedded model_config.yaml,
+                # resolve the concrete class (with a fallback map for missing
+                # internal classes), and call restore_from on that class directly.
+                cls = _resolve_concrete_class_from_nemo(model_name) or ASRModel
+                asr_model = cls.restore_from(model_name, map_location=map_location)
             else:
                 asr_model = ASRModel.from_pretrained(model_name, map_location=map_location)
             asr_model.eval()
