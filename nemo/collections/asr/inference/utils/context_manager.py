@@ -130,9 +130,27 @@ class CacheAwareContextManager:
             dtype=torch.long,
         )
 
-        # In-place copy along batch/slot dimension
-        self.cache_last_channel.index_copy_(1, slot_ids, new_context.cache_last_channel.index_select(1, tgt_slot_ids))
-        self.cache_last_time.index_copy_(1, slot_ids, new_context.cache_last_time.index_select(1, tgt_slot_ids))
+        # In-place copy along batch/slot dimension.
+        # `.to(dtype=...)` here is a defensive cast that coerces the encoder's
+        # cache output to whatever dtype the pre-allocated cache buffer was
+        # created with. Needed when the engine binding dtype and the runtime
+        # cache buffer dtype disagree (e.g. apply_fp16_cache_patch allocated
+        # an fp16 buffer but TRT's io_dtype_overrides didn't take effect, so
+        # the engine output is still fp32). When dtypes already match this
+        # is a no-op; when they differ it's a tiny per-step cast that beats
+        # crashing on `index_copy_(): self and source expected to have the
+        # same dtype`. Same idea applies to cache_last_time.
+        # cache_last_channel_len is int64 in both halves so it's left alone.
+        self.cache_last_channel.index_copy_(
+            1,
+            slot_ids,
+            new_context.cache_last_channel.index_select(1, tgt_slot_ids).to(dtype=self.cache_last_channel.dtype),
+        )
+        self.cache_last_time.index_copy_(
+            1,
+            slot_ids,
+            new_context.cache_last_time.index_select(1, tgt_slot_ids).to(dtype=self.cache_last_time.dtype),
+        )
         self.cache_last_channel_len.index_copy_(
             0, slot_ids, new_context.cache_last_channel_len.index_select(0, tgt_slot_ids)
         )

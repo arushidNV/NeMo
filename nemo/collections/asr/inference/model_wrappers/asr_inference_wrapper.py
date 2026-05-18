@@ -31,16 +31,15 @@ from nemo.utils import logging, model_utils
 # Map .nemo `target:` values whose concrete class is missing from this NeMo
 # install onto a known-compatible class. The substitute must be a superset
 # w.r.t. state_dict tensor names and forward semantics for the inference
-# path we care about. Added because Riva ships checkpoints trained on
-# internal feature branches whose target classes do not exist upstream.
-_NEMO_TARGET_FALLBACKS = {
-    # Pure RNN-T-with-prompt model (internal Riva training branch) ->
-    # hybrid RNN-T+CTC-with-prompt class. The hybrid class loads RNN-T-only
-    # state_dicts cleanly; the unused CTC head is randomly initialised but
-    # never executed at inference time in the cache-aware streaming path.
-    "nemo.collections.asr.models.rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt":
-        "nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt.EncDecHybridRNNTCTCBPEModelWithPrompt",
-}
+# path we care about. Added because Riva sometimes ships checkpoints trained
+# on internal feature branches whose target classes do not exist upstream.
+#
+# The dict is intentionally empty in the steady state; populate it only when a
+# specific checkpoint surfaces a missing-class load failure. (Previous entry
+# remapping rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt to the hybrid
+# class was removed once the real EncDecRNNTBPEModelWithPrompt was added via
+# PR #15666 / cherry-pick.)
+_NEMO_TARGET_FALLBACKS: dict[str, str] = {}
 
 
 def _resolve_concrete_class_from_nemo(
