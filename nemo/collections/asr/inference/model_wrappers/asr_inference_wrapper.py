@@ -43,14 +43,21 @@ _NEMO_TARGET_FALLBACKS = {
 }
 
 
-def _resolve_concrete_class_from_nemo(nemo_path: str) -> Optional[Type[ASRModel]]:
+def _resolve_concrete_class_from_nemo(
+    nemo_path: str,
+) -> tuple[Optional[Type[ASRModel]], bool]:
     """Peek at the embedded model_config.yaml inside a .nemo tarball, look up
-    its top-level `target:` (or `_target_:`) field, and return the matching
-    concrete subclass of ASRModel.
+    its top-level `target:` (or `_target_:`) field, and return
+    (concrete_class, was_remapped).
 
-    If the target points to a class that doesn't exist in this NeMo install,
-    apply _NEMO_TARGET_FALLBACKS to map it to a compatible substitute. Returns
-    None when no usable target can be resolved.
+    `was_remapped` is True when _NEMO_TARGET_FALLBACKS substituted a different
+    class than the one the .nemo's config asked for. The caller should set
+    strict=False on restore_from() in that case, because the substitute is a
+    superset (e.g. hybrid-with-CTC-head loading an RNN-T-only state_dict) and
+    will have extra parameter keys that the saved state_dict doesn't carry.
+
+    Returns (None, False) when no usable target can be resolved; caller should
+    fall back to ASRModel.restore_from() with default strict semantics.
 
     This is necessary because ASRModel.restore_from() falls back to
     instantiating ASRModel itself (which is abstract) when it can't parse the
@@ -69,26 +76,30 @@ def _resolve_concrete_class_from_nemo(nemo_path: str) -> Optional[Type[ASRModel]
                     cfg_text = f.read().decode("utf-8", errors="ignore")
                     break
         if not cfg_text:
-            return None
+            return None, False
         cfg = yaml.safe_load(cfg_text)
         if not isinstance(cfg, dict):
-            return None
+            return None, False
         target = cfg.get("target") or cfg.get("_target_")
         if not target or not isinstance(target, str):
-            return None
+            return None, False
         resolved = _NEMO_TARGET_FALLBACKS.get(target, target)
-        if resolved != target:
+        was_remapped = resolved != target
+        if was_remapped:
             logging.info(
                 f"asr_inference_wrapper.load_model: remapping missing target "
-                f"`{target}` -> `{resolved}` via _NEMO_TARGET_FALLBACKS."
+                f"`{target}` -> `{resolved}` via _NEMO_TARGET_FALLBACKS. "
+                f"Will load with strict=False; substitute class is a tensor "
+                f"superset and any missing keys (e.g. unused heads) will be "
+                f"randomly initialised."
             )
-        return model_utils.import_class_by_path(resolved)
+        return model_utils.import_class_by_path(resolved), was_remapped
     except Exception as e:
         logging.warning(
             f"asr_inference_wrapper.load_model: failed to resolve concrete class "
             f"from {nemo_path}: {e}; falling back to ASRModel.restore_from()."
         )
-        return None
+        return None, False
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecodingConfig
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
 from nemo.collections.asr.parts.utils.asr_confidence_utils import get_confidence_aggregation_bank
@@ -157,8 +168,17 @@ class ASRInferenceWrapper:
                 # error. To avoid that, peek at the embedded model_config.yaml,
                 # resolve the concrete class (with a fallback map for missing
                 # internal classes), and call restore_from on that class directly.
-                cls = _resolve_concrete_class_from_nemo(model_name) or ASRModel
-                asr_model = cls.restore_from(model_name, map_location=map_location)
+                resolved_cls, was_remapped = _resolve_concrete_class_from_nemo(model_name)
+                cls = resolved_cls or ASRModel
+                # Substitute classes from _NEMO_TARGET_FALLBACKS are supersets
+                # (e.g. hybrid-with-CTC loading an RNN-T-only state_dict). Allow
+                # missing keys so the unused subnet stays at its random init.
+                if was_remapped:
+                    asr_model = cls.restore_from(
+                        model_name, map_location=map_location, strict=False
+                    )
+                else:
+                    asr_model = cls.restore_from(model_name, map_location=map_location)
             else:
                 asr_model = ASRModel.from_pretrained(model_name, map_location=map_location)
             asr_model.eval()
