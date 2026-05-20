@@ -145,7 +145,7 @@ class CacheAwareRNNTInferenceWrapper(CacheAwareASRInferenceWrapper):
         prev_accumulate = None
         if greedy is not None:
             prev_accumulate = getattr(greedy, "_accumulate_partial_hypothesis", True)
-            greedy._accumulate_partial_hypothesis = False
+            greedy._accumulate_partial_hypothesis = True
         try:
             best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
                 encoded,
