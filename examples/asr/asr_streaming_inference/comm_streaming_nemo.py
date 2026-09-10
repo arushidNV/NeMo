@@ -61,6 +61,12 @@ def parse_args():
     p.add_argument("--decoding", choices=["greedy", "beam"], required=True, help="Decoding strategy")
     p.add_argument("--manifest_dir", default=".", help="Directory containing *.json manifests (default: cwd)")
     p.add_argument("--batch_size", type=int, default=None, help="Override streaming.batch_size (default: profile yaml default)")
+    p.add_argument(
+        "--length_norm_power",
+        type=float,
+        default=None,
+        help="Override asr.decoding.beam.length_norm_power (beam decoding only; 1.0=plain average, 0.0=off/pre-MR default)",
+    )
     p.add_argument("--reverse", action="store_true", help="Process manifests in reverse sorted order")
     return p.parse_args()
 
@@ -164,6 +170,8 @@ def main():
         ]
         if args.batch_size is not None:
             cmd.append(f"streaming.batch_size={args.batch_size}")
+        if args.length_norm_power is not None:
+            cmd.append(f"asr.decoding.beam.length_norm_power={args.length_norm_power}")
 
         print(f"[run] {name} (profile={args.profile}, decoding={args.decoding})")
         subprocess.run(cmd, env=SUBPROCESS_ENV)
