@@ -1,0 +1,17 @@
+# Multilingual cache-aware RNNT streaming profile, MALSD batched beam search decoding.
+# NOTE: att_context_size uses the [56,*] family -- see cache_aware_rnnt_multi_greedy.yaml for caveats.
+defaults:
+  - cache_aware_rnnt
+  - _self_
+
+asr:
+  model_name: /mnt/cifs/home/riva_speech/model_files/asr/cache-aware-parakeet-rnnt/multi/nemotron_realtime_0.6b_multi.nemo
+  decoding:
+    strategy: "malsd_batch"
+    beam:
+      beam_size: 16
+
+streaming:
+  att_context_size: [56, 1]
+
+lang: null   # multilingual: language resolved per-utterance from manifest / model, not fixed
