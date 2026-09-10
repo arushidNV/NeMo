@@ -61,13 +61,21 @@ fi
 echo "=== 5. Pull the eval container ==="
 docker pull "$DOCKER_IMAGE"
 
-echo "=== 6. Run all 4 profile x decoding combos ==="
+# COMBOS overrides which profile x decoding pairs to run, semicolon-separated "profile:decoding".
+# Default runs all 4. Set e.g. COMBOS="mono:beam" to run just one -- useful when splitting the
+# 4 combos across separate node leases in parallel.
+if [ -n "${COMBOS:-}" ]; then
+    IFS=';' read -ra COMBO_LIST <<< "$COMBOS"
+else
+    COMBO_LIST=("mono:greedy" "mono:beam" "multi:greedy" "multi:beam")
+fi
+
+echo "=== 6. Run combo(s): ${COMBO_LIST[*]} ==="
 mkdir -p "$CIFS_OUT_BASE"
 
-for combo in "mono greedy" "mono beam" "multi greedy" "multi beam"; do
-    set -- $combo
-    profile="$1"
-    decoding="$2"
+for combo in "${COMBO_LIST[@]}"; do
+    profile="${combo%%:*}"
+    decoding="${combo##*:}"
     out_name="${profile}_${decoding}"
     echo "--- Running profile=$profile decoding=$decoding -> $CIFS_OUT_BASE/$out_name ---"
     docker run --rm --gpus all --shm-size=16g \
