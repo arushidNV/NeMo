@@ -30,6 +30,13 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STREAMING_INFER = os.path.join(SCRIPT_DIR, "asr_streaming_infer.py")
 CONF_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "conf", "asr_streaming_inference")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
+
+# Force `import nemo` in the subprocess to resolve to this checked-out repo, not whatever
+# nemo-toolkit ships baked into the container's site-packages (which can be an older pin
+# lacking symbols this branch's examples/ scripts expect, e.g. pipeline_eval.calculate_asr_laal).
+SUBPROCESS_ENV = os.environ.copy()
+SUBPROCESS_ENV["PYTHONPATH"] = REPO_ROOT + os.pathsep + SUBPROCESS_ENV.get("PYTHONPATH", "")
 
 PROFILE_CONFIG = {
     ("mono", "greedy"): "cache_aware_rnnt_mono_greedy.yaml",
@@ -159,7 +166,7 @@ def main():
             cmd.append(f"streaming.batch_size={args.batch_size}")
 
         print(f"[run] {name} (profile={args.profile}, decoding={args.decoding})")
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=SUBPROCESS_ENV)
 
         wer = compute_wer(manifest, out_json)
         print(f"{name}\t{wer}")
