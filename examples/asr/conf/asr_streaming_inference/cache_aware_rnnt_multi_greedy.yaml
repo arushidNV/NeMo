@@ -1,0 +1,18 @@
+# Multilingual cache-aware RNNT streaming profile, greedy_batch decoding.
+# NOTE: att_context_size uses the [56,*] family per the multilingual prompt-conditioned model comment in
+# cache_aware_rnnt.yaml (nvidia/nemotron-3.5-asr-streaming-0.6b uses [56,13],[56,6],[56,3],[56,1],[56,0]).
+# [56,1] mirrors the mono profile's low-latency choice ([70,1]) -- confirm this is the right lookahead for
+# nemotron_realtime_0.6b_multi.nemo before relying on these numbers.
+defaults:
+  - cache_aware_rnnt
+  - _self_
+
+asr:
+  model_name: /mnt/cifs/home/riva_speech/model_files/asr/cache-aware-parakeet-rnnt/multi/nemotron_realtime_0.6b_multi.nemo
+  decoding:
+    strategy: "greedy_batch"
+
+streaming:
+  att_context_size: [56, 1]
+
+lang: null   # multilingual: language resolved per-utterance from manifest / model, not fixed

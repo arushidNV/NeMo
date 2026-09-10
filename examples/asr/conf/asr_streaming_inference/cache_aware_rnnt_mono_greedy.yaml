@@ -1,0 +1,15 @@
+# Mono (en-US) cache-aware RNNT streaming profile, greedy_batch decoding.
+# Inherits everything from cache_aware_rnnt.yaml except model_name, att_context_size, lang, and decoding.strategy.
+defaults:
+  - cache_aware_rnnt
+  - _self_
+
+asr:
+  model_name: /mnt/cifs/home/riva_speech/model_files/asr/cache-aware-parakeet-rnnt/en-US/nemotron_realtime_0.6b_riva.nemo
+  decoding:
+    strategy: "greedy_batch"
+
+streaming:
+  att_context_size: [70, 1]   # low-latency lookahead, matches prior comm_streaming_nemo.py default
+
+lang: "en"
