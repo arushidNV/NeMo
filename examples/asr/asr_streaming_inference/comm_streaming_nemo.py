@@ -4,6 +4,11 @@ Runs the cache-aware RNNT streaming pipeline (asr_streaming_infer.py) over every
 *.json manifest in a directory, for a chosen model profile (mono/multi) and
 decoding mode (greedy/beam), then aggregates WER into a CSV.
 
+Output layout (flat, one out_dir per profile x decoding combo):
+    <out_dir>/<dataset_name>.json      # pred_text (+ metrics) per utterance
+    <out_dir>/segments/<dataset_name>/ # word/segment-level detail (output_dir)
+    <out_dir>/wer.csv                  # one row per dataset
+
 Config profiles live in ../conf/asr_streaming_inference/:
     cache_aware_rnnt_mono_greedy.yaml   cache_aware_rnnt_mono_beam.yaml
     cache_aware_rnnt_multi_greedy.yaml  cache_aware_rnnt_multi_beam.yaml
