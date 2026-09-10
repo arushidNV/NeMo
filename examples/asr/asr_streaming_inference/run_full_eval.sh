@@ -73,10 +73,17 @@ fi
 echo "=== 6. Run combo(s): ${COMBO_LIST[*]} ==="
 mkdir -p "$CIFS_OUT_BASE"
 
+# OUT_SUFFIX appends to the output folder name (e.g. "_lnp0") so variant runs (different
+# Hydra overrides via EXTRA_ARGS) don't collide with an existing run's output directory.
+# EXTRA_ARGS is passed straight through to comm_streaming_nemo.py, e.g.
+#   EXTRA_ARGS="--length_norm_power 0" COMBOS="mono:beam;multi:beam" OUT_SUFFIX="_lnp0" ./run_full_eval.sh
+OUT_SUFFIX="${OUT_SUFFIX:-}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+
 for combo in "${COMBO_LIST[@]}"; do
     profile="${combo%%:*}"
     decoding="${combo##*:}"
-    out_name="${profile}_${decoding}"
+    out_name="${profile}_${decoding}${OUT_SUFFIX}"
     echo "--- Running profile=$profile decoding=$decoding -> $CIFS_OUT_BASE/$out_name ---"
     docker run --rm --gpus all --shm-size=16g \
         -v "$REPO_DIR:/workspace/NeMo" \
@@ -87,7 +94,8 @@ for combo in "${COMBO_LIST[@]}"; do
             echo y | python3 examples/asr/asr_streaming_inference/comm_streaming_nemo.py \
                 '$CIFS_OUT_BASE/$out_name' \
                 --profile '$profile' --decoding '$decoding' \
-                --manifest_dir /workspace/data
+                --manifest_dir /workspace/data \
+                $EXTRA_ARGS
         "
 done
 
