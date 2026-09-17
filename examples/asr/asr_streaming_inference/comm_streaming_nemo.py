@@ -67,6 +67,17 @@ def parse_args():
         default=None,
         help="Override asr.decoding.beam.length_norm_power (beam decoding only; 1.0=plain average, 0.0=off/pre-MR default)",
     )
+    p.add_argument(
+        "--ngram_lm_model",
+        default=None,
+        help="Path to a built '.nemo' NGPU-LM model, override asr.decoding.beam.ngram_lm_model (beam decoding only)",
+    )
+    p.add_argument(
+        "--ngram_lm_alpha",
+        type=float,
+        default=None,
+        help="Override asr.decoding.beam.ngram_lm_alpha (LM fusion weight; NeMo docs suggest ~0.2 for RNNT)",
+    )
     p.add_argument("--reverse", action="store_true", help="Process manifests in reverse sorted order")
     return p.parse_args()
 
@@ -172,6 +183,10 @@ def main():
             cmd.append(f"streaming.batch_size={args.batch_size}")
         if args.length_norm_power is not None:
             cmd.append(f"asr.decoding.beam.length_norm_power={args.length_norm_power}")
+        if args.ngram_lm_model is not None:
+            cmd.append(f"asr.decoding.beam.ngram_lm_model={args.ngram_lm_model}")
+        if args.ngram_lm_alpha is not None:
+            cmd.append(f"asr.decoding.beam.ngram_lm_alpha={args.ngram_lm_alpha}")
 
         print(f"[run] {name} (profile={args.profile}, decoding={args.decoding})")
         subprocess.run(cmd, env=SUBPROCESS_ENV)
