@@ -20,8 +20,10 @@ REPO_BRANCH="${REPO_BRANCH:-eval-streaming-inference}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-nvcr.io/nvidia/nemo-speech:26.07.00}"
 CIFS_OUT_BASE="${CIFS_OUT_BASE:-/mnt/cifs/home/riva_speech/mayjain/arushid}"
 CIFS_MODEL_BASE="${CIFS_MODEL_BASE:-/mnt/cifs/home/riva_speech/model_files}"
-MONO_MODEL="$CIFS_MODEL_BASE/asr/cache-aware-parakeet-rnnt/en-US/nemotron_realtime_0.6b_riva.nemo"
-MULTI_MODEL="$CIFS_MODEL_BASE/asr/cache-aware-parakeet-rnnt/multi/nemotron_realtime_0.6b_multi.nemo"
+# Overridable so a checkpoint outside the CIFS default (e.g. under /home/scratch.<user>_sw/)
+# can be verified here too -- keep these in sync with any --model_name passed via EXTRA_ARGS.
+MONO_MODEL="${MONO_MODEL:-$CIFS_MODEL_BASE/asr/cache-aware-parakeet-rnnt/en-US/nemotron_realtime_0.6b_riva.nemo}"
+MULTI_MODEL="${MULTI_MODEL:-$CIFS_MODEL_BASE/asr/cache-aware-parakeet-rnnt/multi/nemotron_realtime_0.6b_multi.nemo}"
 
 echo "=== 1. Verify /tmp is local disk, not tmpfs ==="
 STAGE_PARENT_FS=$(df --output=fstype "$(dirname "$STAGE_DIR")" | tail -1 | tr -d ' ')
@@ -40,8 +42,29 @@ else
     time tar -C "$DATASET_SRC" -cf - . | tar -C "$STAGE_DIR" -xf -
 fi
 
+# COMBOS overrides which profile x decoding pairs to run, semicolon-separated "profile:decoding".
+# Default runs all 4. Set e.g. COMBOS="mono:beam" to run just one -- useful when splitting the
+# 4 combos across separate node leases in parallel. Parsed early so step 3 only verifies the
+# checkpoint(s) actually needed for the requested combos.
+if [ -n "${COMBOS:-}" ]; then
+    IFS=';' read -ra COMBO_LIST <<< "$COMBOS"
+else
+    COMBO_LIST=("mono:greedy" "mono:beam" "multi:greedy" "multi:beam")
+fi
+
 echo "=== 3. Verify model checkpoints are reachable ==="
-for f in "$MONO_MODEL" "$MULTI_MODEL"; do
+NEED_MONO=0
+NEED_MULTI=0
+for combo in "${COMBO_LIST[@]}"; do
+    case "${combo%%:*}" in
+        mono) NEED_MONO=1 ;;
+        multi) NEED_MULTI=1 ;;
+    esac
+done
+CHECK_MODELS=()
+[ "$NEED_MONO" = 1 ] && CHECK_MODELS+=("$MONO_MODEL")
+[ "$NEED_MULTI" = 1 ] && CHECK_MODELS+=("$MULTI_MODEL")
+for f in "${CHECK_MODELS[@]}"; do
     if [ ! -r "$f" ]; then
         echo "ERROR: model checkpoint not readable: $f" >&2
         exit 1
@@ -60,15 +83,6 @@ fi
 
 echo "=== 5. Pull the eval container ==="
 docker pull "$DOCKER_IMAGE"
-
-# COMBOS overrides which profile x decoding pairs to run, semicolon-separated "profile:decoding".
-# Default runs all 4. Set e.g. COMBOS="mono:beam" to run just one -- useful when splitting the
-# 4 combos across separate node leases in parallel.
-if [ -n "${COMBOS:-}" ]; then
-    IFS=';' read -ra COMBO_LIST <<< "$COMBOS"
-else
-    COMBO_LIST=("mono:greedy" "mono:beam" "multi:greedy" "multi:beam")
-fi
 
 echo "=== 6. Run combo(s): ${COMBO_LIST[*]} ==="
 mkdir -p "$CIFS_OUT_BASE"
