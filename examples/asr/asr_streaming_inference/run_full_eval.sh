@@ -89,6 +89,7 @@ for combo in "${COMBO_LIST[@]}"; do
         -v "$REPO_DIR:/workspace/NeMo" \
         -v "$STAGE_DIR:/workspace/data:ro" \
         -v "/mnt/cifs/home/riva_speech:/mnt/cifs/home/riva_speech" \
+        -v "/home:/home:ro" \
         "$DOCKER_IMAGE" bash -c "
             cd /workspace/NeMo && \
             echo y | python3 examples/asr/asr_streaming_inference/comm_streaming_nemo.py \
