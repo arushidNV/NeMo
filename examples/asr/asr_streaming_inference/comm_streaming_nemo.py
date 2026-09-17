@@ -62,6 +62,11 @@ def parse_args():
     p.add_argument("--manifest_dir", default=".", help="Directory containing *.json manifests (default: cwd)")
     p.add_argument("--batch_size", type=int, default=None, help="Override streaming.batch_size (default: profile yaml default)")
     p.add_argument(
+        "--model_name",
+        default=None,
+        help="Override asr.model_name (path to a '.nemo' checkpoint), default: profile yaml's hardcoded path",
+    )
+    p.add_argument(
         "--length_norm_power",
         type=float,
         default=None,
@@ -181,6 +186,8 @@ def main():
         ]
         if args.batch_size is not None:
             cmd.append(f"streaming.batch_size={args.batch_size}")
+        if args.model_name is not None:
+            cmd.append(f"asr.model_name={args.model_name}")
         if args.length_norm_power is not None:
             cmd.append(f"asr.decoding.beam.length_norm_power={args.length_norm_power}")
         if args.ngram_lm_model is not None:
