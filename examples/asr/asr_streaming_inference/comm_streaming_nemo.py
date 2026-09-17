@@ -84,6 +84,12 @@ def parse_args():
         help="Override asr.decoding.beam.ngram_lm_alpha (LM fusion weight; NeMo docs suggest ~0.2 for RNNT)",
     )
     p.add_argument("--reverse", action="store_true", help="Process manifests in reverse sorted order")
+    p.add_argument(
+        "--datasets",
+        default=None,
+        help="Comma-separated dataset names (manifest basename without .json) to restrict this run to, "
+        "e.g. --datasets GTC2019,LogMeIn,Ring_central",
+    )
     return p.parse_args()
 
 
@@ -162,12 +168,21 @@ def main():
 
     config_name = PROFILE_CONFIG[(args.profile, args.decoding)]
 
+    wanted = None
+    if args.datasets:
+        wanted = {d.strip() for d in args.datasets.split(",") if d.strip()}
+
     manifests = sorted(
-        (p for p in glob.glob(os.path.join(args.manifest_dir, "*.json")) if os.path.basename(p) != "final_transcripts.json"),
+        (
+            p
+            for p in glob.glob(os.path.join(args.manifest_dir, "*.json"))
+            if os.path.basename(p) != "final_transcripts.json"
+            and (wanted is None or os.path.splitext(os.path.basename(p))[0] in wanted)
+        ),
         reverse=args.reverse,
     )
     if not manifests:
-        sys.exit(f"No *.json manifests found in {args.manifest_dir}")
+        sys.exit(f"No *.json manifests found in {args.manifest_dir}" + (f" matching --datasets {args.datasets}" if wanted else ""))
 
     wer_results = []
     for manifest in manifests:
